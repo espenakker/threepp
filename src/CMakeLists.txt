@@ -207,6 +207,7 @@ set(publicHeaders
 
         "threepp/renderers/Renderer.hpp"
         "threepp/renderers/GLRenderer.hpp"
+        "threepp/renderers/DawnRenderer.hpp"
         "threepp/renderers/GLRenderTarget.hpp"
 
         "threepp/renderers/gl/GLInfo.hpp"
@@ -538,6 +539,12 @@ These can be installed on Ubuntu systems via sudo apt install libxinerama-dev li
     endif ()
 endif ()
 
+if (THREEPP_WITH_DAWN)
+    list(APPEND sources
+            "threepp/renderers/DawnRenderer.cpp"
+    )
+endif ()
+
 if (NOT DEFINED EMSCRIPTEN)
     list(APPEND privateHeaders
             "threepp/utils/LoadGlad.hpp"
@@ -602,6 +609,18 @@ if (NOT DEFINED EMSCRIPTEN)
         endif ()
     endif ()
 
+endif ()
+
+
+if (THREEPP_WITH_DAWN)
+    target_include_directories(threepp
+            PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/external/wgpu-native/include"
+    )
+    target_link_libraries(threepp PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/external/wgpu-native/lib/libwgpu_native.a"
+    )
+    target_compile_definitions(threepp PRIVATE THREEPP_WITH_DAWN=1)
 endif ()
 
 
