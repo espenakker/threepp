@@ -232,6 +232,9 @@ set(privateHeaders
 
         "threepp/renderers/GLCubeRenderTarget.hpp"
 
+        "threepp/renderers/common/Lights.hpp"
+        "threepp/renderers/common/RenderStates.hpp"
+
         "threepp/renderers/gl/Buffer.hpp"
         "threepp/renderers/gl/GLAttributes.hpp"
         "threepp/renderers/gl/GLBackground.hpp"
@@ -433,6 +436,9 @@ set(sources
 
         "threepp/renderers/GLRenderer.cpp"
         "threepp/renderers/GLRenderTarget.cpp"
+
+        "threepp/renderers/common/Lights.cpp"
+        "threepp/renderers/common/RenderStates.cpp"
 
         "threepp/renderers/gl/GLAttributes.cpp"
         "threepp/renderers/gl/GLBackground.cpp"
