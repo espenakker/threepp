@@ -205,6 +205,7 @@ set(publicHeaders
         "threepp/lights/SpotLight.hpp"
         "threepp/lights/SpotLightShadow.hpp"
 
+        "threepp/renderers/Renderer.hpp"
         "threepp/renderers/GLRenderer.hpp"
         "threepp/renderers/GLRenderTarget.hpp"
 
