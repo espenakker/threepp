@@ -322,23 +322,27 @@ struct DawnRenderer::Impl {
     }
 
     void initWebGPU() {
-        // Create instance
+        // Create instance with primary backends (Vulkan/Metal/DX12).
+        // Avoid GL backend as it conflicts with GLFW's GL context.
+        WGPUInstanceExtras instanceExtras{};
+        instanceExtras.chain.sType = static_cast<WGPUSType>(WGPUSType_InstanceExtras);
+        instanceExtras.chain.next = nullptr;
+        instanceExtras.backends = WGPUInstanceBackend_Primary;
+
         WGPUInstanceDescriptor instanceDesc{};
-        instanceDesc.nextInChain = nullptr;
+        instanceDesc.nextInChain = &instanceExtras.chain;
         instance = wgpuCreateInstance(&instanceDesc);
         if (!instance) {
             std::cerr << "DawnRenderer: Failed to create WebGPU instance" << std::endl;
             return;
         }
 
-        // Create surface from GLFW window
+        // Try to create surface from GLFW window.
+        // Surface creation may fail in headless environments — that's OK,
+        // the renderer can still operate with render targets only.
         createSurface();
-        if (!surface) {
-            std::cerr << "DawnRenderer: Failed to create surface" << std::endl;
-            return;
-        }
 
-        // Request adapter (synchronous via callback)
+        // Request adapter (surface is optional — nullptr works for offscreen)
         requestAdapter();
         if (!adapter) {
             std::cerr << "DawnRenderer: Failed to get adapter" << std::endl;
@@ -354,8 +358,10 @@ struct DawnRenderer::Impl {
 
         queue = wgpuDeviceGetQueue(device);
 
-        // Configure surface
-        configureSurface();
+        // Configure surface (only if we have one)
+        if (surface) {
+            configureSurface();
+        }
 
         // Create uniform buffers
         createUniformBuffers();
@@ -364,7 +370,8 @@ struct DawnRenderer::Impl {
         createDummyTexture();
 
         initialized = true;
-        std::cout << "DawnRenderer: WebGPU initialized successfully" << std::endl;
+        std::cout << "DawnRenderer: WebGPU initialized successfully"
+                  << (surface ? "" : " (headless, no surface)") << std::endl;
     }
 
     void createSurface() {
@@ -411,7 +418,7 @@ struct DawnRenderer::Impl {
         } userData;
 
         WGPURequestAdapterOptions options{};
-        options.compatibleSurface = surface;
+        options.compatibleSurface = surface; // nullptr in headless mode
 
         WGPURequestAdapterCallbackInfo callbackInfo{};
         callbackInfo.mode = WGPUCallbackMode_AllowSpontaneous;
@@ -667,6 +674,7 @@ struct DawnRenderer::Impl {
         sd.addressModeU = WGPUAddressMode_Repeat;
         sd.addressModeV = WGPUAddressMode_Repeat;
         sd.addressModeW = WGPUAddressMode_Repeat;
+        sd.maxAnisotropy = 1;
         dummyTexture.sampler = wgpuDeviceCreateSampler(device, &sd);
     }
 
@@ -726,6 +734,7 @@ struct DawnRenderer::Impl {
         sd.addressModeU = mapWrap(tex->wrapS);
         sd.addressModeV = mapWrap(tex->wrapT);
         sd.addressModeW = WGPUAddressMode_ClampToEdge;
+        sd.maxAnisotropy = 1;
         entry.sampler = wgpuDeviceCreateSampler(device, &sd);
 
         entry.version = tex->version();
@@ -960,7 +969,7 @@ struct DawnRenderer::Impl {
         auto currentSize = canvas.size();
         if (currentSize.width() != size_.width() || currentSize.height() != size_.height()) {
             size_ = currentSize;
-            configureSurface();
+            if (surface) configureSurface();
             viewport_.w = static_cast<float>(size_.width());
             viewport_.h = static_cast<float>(size_.height());
             scissor_.w = static_cast<uint32_t>(size_.width());
@@ -978,7 +987,7 @@ struct DawnRenderer::Impl {
         Matrix4 viewMatrix = camera.matrixWorldInverse;
 
         // Collect and setup lights
-        auto* rs = renderStates.get(&scene);
+        auto* rs = renderStates.get(&scene, 0);
         rs->init();
         collectLights(scene, rs);
         rs->setupLights();
@@ -992,7 +1001,12 @@ struct DawnRenderer::Impl {
         WGPUTextureView depthView = nullptr;
         WGPUTexture frameDepthTexture = nullptr;
         WGPUSurfaceTexture surfaceTexture{};
-        bool useSurface = (currentRenderTarget_ == nullptr);
+        bool useSurface = (currentRenderTarget_ == nullptr && surface != nullptr);
+
+        if (currentRenderTarget_ == nullptr && surface == nullptr) {
+            // Headless mode with no render target set — nothing to render to
+            return;
+        }
 
         if (useSurface) {
             wgpuSurfaceGetCurrentTexture(surface, &surfaceTexture);
@@ -1035,6 +1049,7 @@ struct DawnRenderer::Impl {
         WGPURenderPassColorAttachment colorAttachment{};
         colorAttachment.view = colorView;
         colorAttachment.resolveTarget = nullptr;
+        colorAttachment.depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
         colorAttachment.loadOp = WGPULoadOp_Clear;
         colorAttachment.storeOp = WGPUStoreOp_Store;
         colorAttachment.clearValue = {
@@ -1237,6 +1252,8 @@ struct DawnRenderer::Impl {
     }
 
     void dispose() {
+        if (!initialized) return;
+
         // Release geometry cache
         for (auto& [id, gb] : geometryCache) {
             if (gb.vertexBuffer) wgpuBufferRelease(gb.vertexBuffer);
