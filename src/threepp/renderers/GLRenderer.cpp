@@ -18,6 +18,9 @@
 #include "threepp/renderers/gl/GLTextures.hpp"
 #include "threepp/renderers/gl/GLUtils.hpp"
 
+#include "threepp/renderers/common/RendererCapabilities.hpp"
+#include "threepp/renderers/common/ShadowConfig.hpp"
+
 #include "threepp/cameras/OrthographicCamera.hpp"
 #include "threepp/canvas/Monitor.hpp"
 #include "threepp/materials/RawShaderMaterial.hpp"
@@ -620,7 +623,15 @@ struct GLRenderer::Impl {
 
         auto lightsStateVersion = lights.state.version;
 
-        auto parameters = gl::GLPrograms::getParameters(scope, clipping, material, lights.state, shadowsArray.size(), scene, object);
+        ShadowConfig shadowCfg{shadowMap.enabled, shadowMap.type};
+        auto& glCaps = gl::GLCapabilities::instance();
+        RendererCapabilities caps;
+        caps.vertexTextures = glCaps.vertexTextures;
+        caps.floatVertexTextures = glCaps.floatVertexTextures;
+        caps.logarithmicDepthBuffer = glCaps.logarithmicDepthBuffer;
+        caps.maxVertexUniforms = glCaps.maxVertexUniforms;
+
+        auto parameters = gl::GLPrograms::getParameters(scope, shadowCfg, caps, clipping, material, lights.state, shadowsArray.size(), scene, object);
         auto programCacheKey = gl::GLPrograms::getProgramCacheKey(scope, parameters);
 
         auto& programs = materialProperties->programs;

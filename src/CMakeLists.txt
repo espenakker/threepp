@@ -235,6 +235,8 @@ set(privateHeaders
 
         "threepp/renderers/common/Lights.hpp"
         "threepp/renderers/common/RenderStates.hpp"
+        "threepp/renderers/common/RendererCapabilities.hpp"
+        "threepp/renderers/common/ShadowConfig.hpp"
 
         "threepp/renderers/gl/Buffer.hpp"
         "threepp/renderers/gl/GLAttributes.hpp"
