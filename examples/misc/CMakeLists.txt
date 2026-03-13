@@ -9,4 +9,10 @@ add_example(NAME "multiple_scenes")
 
 if (THREEPP_WITH_DAWN)
     add_example(NAME "dawn_triangle")
+    add_example(NAME "dawn_ocean")
+    target_include_directories(dawn_ocean PRIVATE
+        "${WGPU_INCLUDE_DIR}"
+        "${PROJECT_SOURCE_DIR}/src/external/glfw/include"
+    )
+    target_link_libraries(dawn_ocean PRIVATE "${WGPU_LIBRARY}" glfw)
 endif ()
