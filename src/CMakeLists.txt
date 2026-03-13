@@ -618,17 +618,33 @@ endif ()
 
 
 if (THREEPP_WITH_DAWN)
+    set(WGPU_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/external/wgpu-native")
     target_include_directories(threepp
             PRIVATE
-            "${CMAKE_CURRENT_SOURCE_DIR}/external/wgpu-native/include"
+            "${WGPU_ROOT}/include"
     )
-    target_link_libraries(threepp PRIVATE
-            "${CMAKE_CURRENT_SOURCE_DIR}/external/wgpu-native/lib/libwgpu_native.a"
-    )
+
+    # Platform/arch-aware library resolution
+    if (WIN32)
+        find_library(WGPU_NATIVE_LIB NAMES wgpu_native PATHS "${WGPU_ROOT}/lib" NO_DEFAULT_PATH)
+    else ()
+        find_library(WGPU_NATIVE_LIB NAMES wgpu_native PATHS "${WGPU_ROOT}/lib" NO_DEFAULT_PATH)
+    endif ()
+    if (NOT WGPU_NATIVE_LIB)
+        message(FATAL_ERROR
+            "wgpu-native library not found under ${WGPU_ROOT}/lib. "
+            "Please place a wgpu-native build for your platform/architecture there.")
+    endif ()
+    target_link_libraries(threepp PRIVATE "${WGPU_NATIVE_LIB}")
+
     target_compile_definitions(threepp PRIVATE THREEPP_WITH_DAWN=1)
     if (APPLE)
         target_link_libraries(threepp PRIVATE "-framework QuartzCore" "-framework Metal")
     endif ()
+
+    # Export include path and library for dependent targets (tests, examples)
+    set(WGPU_INCLUDE_DIR "${WGPU_ROOT}/include" CACHE INTERNAL "wgpu-native include directory")
+    set(WGPU_LIBRARY "${WGPU_NATIVE_LIB}" CACHE INTERNAL "wgpu-native library path")
 endif ()
 
 

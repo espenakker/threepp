@@ -18,6 +18,7 @@
 #include "threepp/threepp.hpp"
 #include "threepp/renderers/DawnRenderer.hpp"
 #include "threepp/renderers/GLRenderTarget.hpp"
+#include "threepp/textures/Texture.hpp"
 
 #include <webgpu/webgpu.h>
 #include <webgpu/wgpu.h>
@@ -654,4 +655,398 @@ TEST_CASE("Cross: depth ordering is consistent", "[dawn]") {
 
     auto dawnCenter = centerColor(renderWithDawn(*scene, *camera, clearColor), RT_WIDTH, RT_HEIGHT);
     CHECK(dawnCenter.r > dawnCenter.g);
+}
+
+
+// =============================================================================
+// Section 4: Extended Dawn coverage — lights, textures, viewport, lifecycle
+// =============================================================================
+
+TEST_CASE("Dawn: PointLight illuminates a sphere", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto scene = Scene::create();
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 3;
+
+    auto pointLight = PointLight::create(Color(0xffffff), 2.0f);
+    pointLight->position.set(0, 0, 2);
+    scene->add(pointLight);
+
+    auto geometry = SphereGeometry::create(1.0f, 16, 8);
+    auto material = MeshLambertMaterial::create();
+    material->color = Color(0xff4444);
+    auto mesh = Mesh::create(geometry, material);
+    scene->add(mesh);
+
+    auto pixels = renderWithDawn(*scene, *camera, Color(0x000000));
+    REQUIRE(pixels.size() == DATA_SIZE);
+
+    int nonBlack = countNonBlack(pixels);
+    CHECK(nonBlack > PIXEL_COUNT / 8);
+
+    auto avg = averageColor(pixels);
+    CHECK(avg.r > avg.b);
+}
+
+TEST_CASE("Dawn: SpotLight illuminates a sphere", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto scene = Scene::create();
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 4;
+
+    auto spotLight = SpotLight::create(Color(0xffffff), 2.0f);
+    spotLight->position.set(0, 0, 3);
+    spotLight->angle = math::PI / 4;
+    spotLight->penumbra = 0.2f;
+    scene->add(spotLight);
+
+    auto geometry = SphereGeometry::create(1.0f, 16, 8);
+    auto material = MeshPhongMaterial::create();
+    material->color = Color(0x44ff44);
+    auto mesh = Mesh::create(geometry, material);
+    scene->add(mesh);
+
+    auto pixels = renderWithDawn(*scene, *camera, Color(0x000000));
+    REQUIRE(pixels.size() == DATA_SIZE);
+
+    int nonBlack = countNonBlack(pixels);
+    CHECK(nonBlack > PIXEL_COUNT / 8);
+
+    auto avg = averageColor(pixels);
+    CHECK(avg.g > avg.r);
+}
+
+TEST_CASE("Dawn: HemisphereLight tints geometry", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto scene = Scene::create();
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 3;
+
+    auto hemiLight = HemisphereLight::create(Color(0x4444ff), Color(0x442200));
+    hemiLight->position.set(0, 1, 0);
+    scene->add(hemiLight);
+
+    auto geometry = SphereGeometry::create(1.0f, 16, 8);
+    auto material = MeshLambertMaterial::create();
+    material->color = Color(0xffffff);
+    auto mesh = Mesh::create(geometry, material);
+    scene->add(mesh);
+
+    auto pixels = renderWithDawn(*scene, *camera, Color(0x000000));
+    REQUIRE(pixels.size() == DATA_SIZE);
+
+    int nonBlack = countNonBlack(pixels);
+    CHECK(nonBlack > PIXEL_COUNT / 8);
+}
+
+TEST_CASE("Dawn: textured box uses diffuse map", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto scene = Scene::create();
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 3;
+
+    // Create a 2x2 checkerboard texture procedurally
+    std::vector<unsigned char> texData = {
+        255, 0, 0, 255,   // red
+        0, 255, 0, 255,   // green
+        0, 255, 0, 255,   // green
+        255, 0, 0, 255    // red
+    };
+    Image image(texData, 2, 2);
+
+    auto texture = Texture::create(image);
+    texture->needsUpdate();
+
+    auto geometry = BoxGeometry::create(2, 2, 2);
+    auto material = MeshBasicMaterial::create();
+    material->map = texture;
+    auto mesh = Mesh::create(geometry, material);
+    scene->add(mesh);
+
+    auto pixels = renderWithDawn(*scene, *camera, Color(0x000000));
+    REQUIRE(pixels.size() == DATA_SIZE);
+
+    // The box should have visible colored pixels from the texture
+    int nonBlack = countNonBlack(pixels);
+    CHECK(nonBlack > PIXEL_COUNT / 8);
+
+    // Should have both red and green components from the checkerboard
+    auto avg = averageColor(pixels);
+    CHECK(avg.r > 5.0);
+    CHECK(avg.g > 5.0);
+}
+
+TEST_CASE("Dawn: opacity affects brightness", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 3;
+
+    auto makeScene = [](float opacity) {
+        auto scene = Scene::create();
+        auto geometry = BoxGeometry::create(2, 2, 2);
+        auto material = MeshBasicMaterial::create();
+        material->color = Color(0xffffff);
+        material->opacity = opacity;
+        material->transparent = true;
+        auto mesh = Mesh::create(geometry, material);
+        scene->add(mesh);
+        return scene;
+    };
+
+    auto fullPixels = renderWithDawn(*makeScene(1.0f), *camera, Color(0x000000));
+    auto halfPixels = renderWithDawn(*makeScene(0.5f), *camera, Color(0x000000));
+    REQUIRE(fullPixels.size() == DATA_SIZE);
+    REQUIRE(halfPixels.size() == DATA_SIZE);
+
+    auto fullAvg = averageColor(fullPixels);
+    auto halfAvg = averageColor(halfPixels);
+
+    double fullBright = (fullAvg.r + fullAvg.g + fullAvg.b) / 3.0;
+    double halfBright = (halfAvg.r + halfAvg.g + halfAvg.b) / 3.0;
+    CHECK(fullBright > halfBright);
+}
+
+TEST_CASE("Dawn: setSize reconfigures surface", "[dawn]") {
+    REQUIRE_DAWN();
+
+    static Canvas* canvas = nullptr;
+    if (!canvas) {
+        canvas = new Canvas(Canvas::Parameters().size(RT_WIDTH, RT_HEIGHT).headless(true).graphicsApi(GraphicsAPI::WebGPU));
+    }
+
+    DawnRenderer renderer(*canvas);
+
+    // setSize should not crash and should update reported size
+    renderer.setSize({32, 32});
+    auto sz = renderer.size();
+    CHECK(sz.width() == 32);
+    CHECK(sz.height() == 32);
+
+    // Restore
+    renderer.setSize({RT_WIDTH, RT_HEIGHT});
+    sz = renderer.size();
+    CHECK(sz.width() == RT_WIDTH);
+    CHECK(sz.height() == RT_HEIGHT);
+
+    renderer.dispose();
+}
+
+TEST_CASE("Dawn: setPixelRatio updates ratio", "[dawn]") {
+    REQUIRE_DAWN();
+
+    static Canvas* canvas = nullptr;
+    if (!canvas) {
+        canvas = new Canvas(Canvas::Parameters().size(RT_WIDTH, RT_HEIGHT).headless(true).graphicsApi(GraphicsAPI::WebGPU));
+    }
+
+    DawnRenderer renderer(*canvas);
+
+    CHECK(renderer.getTargetPixelRatio() == 1.0f);
+
+    renderer.setPixelRatio(2.0f);
+    CHECK(renderer.getTargetPixelRatio() == 2.0f);
+
+    // Setting pixel ratio should not crash and the renderer should still
+    // be able to render
+    auto scene = Scene::create();
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 5;
+
+    auto target = GLRenderTarget::create(RT_WIDTH, RT_HEIGHT, GLRenderTarget::Options{});
+    renderer.setRenderTarget(target.get());
+    renderer.setClearColor(Color(0.0f, 0.0f, 1.0f));
+    renderer.render(*scene, *camera);
+
+    auto pixels = renderer.readRGBPixels();
+    REQUIRE(pixels.size() == DATA_SIZE);
+
+    // Should have blue clear color
+    auto avg = averageColor(pixels);
+    CHECK(avg.b > avg.r);
+    CHECK(avg.b > avg.g);
+
+    renderer.setPixelRatio(1.0f);
+    renderer.dispose();
+}
+
+TEST_CASE("Dawn: viewport restricts rendering region", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto scene = Scene::create();
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 3;
+
+    auto geometry = BoxGeometry::create(4, 4, 4);
+    auto material = MeshBasicMaterial::create();
+    material->color = Color(0xffffff);
+    auto mesh = Mesh::create(geometry, material);
+    scene->add(mesh);
+
+    static Canvas* canvas = nullptr;
+    if (!canvas) {
+        canvas = new Canvas(Canvas::Parameters().size(RT_WIDTH, RT_HEIGHT).headless(true).graphicsApi(GraphicsAPI::WebGPU));
+    }
+
+    DawnRenderer renderer(*canvas);
+    renderer.setClearColor(Color(0x000000));
+
+    auto target = GLRenderTarget::create(RT_WIDTH, RT_HEIGHT, GLRenderTarget::Options{});
+    renderer.setRenderTarget(target.get());
+
+    // Render full viewport
+    renderer.setViewport(0, 0, RT_WIDTH, RT_HEIGHT);
+    renderer.render(*scene, *camera);
+    auto fullPixels = renderer.readRGBPixels();
+
+    // Render with half-width viewport
+    renderer.setViewport(0, 0, RT_WIDTH / 2, RT_HEIGHT);
+    renderer.render(*scene, *camera);
+    auto halfPixels = renderer.readRGBPixels();
+
+    int fullNonBlack = countNonBlack(fullPixels);
+    int halfNonBlack = countNonBlack(halfPixels);
+
+    // Half viewport should produce fewer lit pixels
+    CHECK(fullNonBlack > halfNonBlack);
+
+    renderer.dispose();
+}
+
+TEST_CASE("Dawn: dispose does not crash on repeated calls", "[dawn]") {
+    REQUIRE_DAWN();
+
+    static Canvas* canvas = nullptr;
+    if (!canvas) {
+        canvas = new Canvas(Canvas::Parameters().size(RT_WIDTH, RT_HEIGHT).headless(true).graphicsApi(GraphicsAPI::WebGPU));
+    }
+
+    DawnRenderer renderer(*canvas);
+    renderer.dispose();
+    // Second dispose should not crash
+    renderer.dispose();
+}
+
+TEST_CASE("Dawn: PlaneGeometry renders correctly", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto scene = Scene::create();
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 3;
+
+    auto geometry = PlaneGeometry::create(3, 3);
+    auto material = MeshBasicMaterial::create();
+    material->color = Color(0x00ffff);
+    material->side = Side::Double;
+    auto mesh = Mesh::create(geometry, material);
+    scene->add(mesh);
+
+    auto pixels = renderWithDawn(*scene, *camera, Color(0x000000));
+    REQUIRE(pixels.size() == DATA_SIZE);
+
+    int nonBlack = countNonBlack(pixels);
+    CHECK(nonBlack > PIXEL_COUNT / 8);
+}
+
+TEST_CASE("Dawn: CylinderGeometry renders correctly", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto scene = Scene::create();
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 4;
+
+    auto geometry = CylinderGeometry::create(0.5f, 0.5f, 2.0f, 16);
+    auto material = MeshBasicMaterial::create();
+    material->color = Color(0xff00ff);
+    auto mesh = Mesh::create(geometry, material);
+    scene->add(mesh);
+
+    auto pixels = renderWithDawn(*scene, *camera, Color(0x000000));
+    REQUIRE(pixels.size() == DATA_SIZE);
+
+    int nonBlack = countNonBlack(pixels);
+    CHECK(nonBlack > PIXEL_COUNT / 16);
+}
+
+TEST_CASE("Dawn: TorusGeometry renders correctly", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto scene = Scene::create();
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 4;
+
+    auto geometry = TorusGeometry::create(1.0f, 0.4f, 8, 16);
+    auto material = MeshBasicMaterial::create();
+    material->color = Color(0xffff00);
+    auto mesh = Mesh::create(geometry, material);
+    scene->add(mesh);
+
+    auto pixels = renderWithDawn(*scene, *camera, Color(0x000000));
+    REQUIRE(pixels.size() == DATA_SIZE);
+
+    int nonBlack = countNonBlack(pixels);
+    CHECK(nonBlack > PIXEL_COUNT / 16);
+}
+
+TEST_CASE("Dawn: emissive material produces visible output without lights", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto scene = Scene::create();
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 3;
+
+    auto geometry = SphereGeometry::create(1.0f, 16, 8);
+    auto material = MeshStandardMaterial::create();
+    material->color = Color(0x000000);
+    material->emissive = Color(0xff8800);
+    auto mesh = Mesh::create(geometry, material);
+    scene->add(mesh);
+
+    // No lights — only emissive should contribute
+    auto pixels = renderWithDawn(*scene, *camera, Color(0x000000));
+    REQUIRE(pixels.size() == DATA_SIZE);
+
+    int nonBlack = countNonBlack(pixels);
+    CHECK(nonBlack > PIXEL_COUNT / 8);
+
+    auto avg = averageColor(pixels);
+    CHECK(avg.r > avg.b);
+}
+
+TEST_CASE("Cross: PointLight produces similar result in both renderers", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto makeScene = []() {
+        auto scene = Scene::create();
+        auto pointLight = PointLight::create(Color(0xffffff), 2.0f);
+        pointLight->position.set(0, 0, 2);
+        scene->add(pointLight);
+
+        auto geometry = SphereGeometry::create(1.0f, 16, 8);
+        auto material = MeshLambertMaterial::create();
+        material->color = Color(0xff8844);
+        auto mesh = Mesh::create(geometry, material);
+        scene->add(mesh);
+        return scene;
+    };
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 3;
+    Color clearColor(0x000000);
+
+    auto glPixels = renderWithGL(*makeScene(), *camera, clearColor);
+    auto dawnPixels = renderWithDawn(*makeScene(), *camera, clearColor);
+
+    int glNonBlack = countNonBlack(glPixels);
+    int dawnNonBlack = countNonBlack(dawnPixels);
+    CHECK(glNonBlack > PIXEL_COUNT / 8);
+    CHECK(dawnNonBlack > PIXEL_COUNT / 8);
+
+    double coverageRatio = static_cast<double>(std::min(glNonBlack, dawnNonBlack)) /
+                           std::max(glNonBlack, dawnNonBlack);
+    CHECK(coverageRatio > 0.5);
 }

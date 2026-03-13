@@ -35,10 +35,12 @@
 #include <webgpu/wgpu.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <iostream>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -50,6 +52,9 @@ extern "C" void* dawn_create_metal_layer(void* nsWindow);
 #endif
 
 namespace {
+
+    // Maximum time to wait for async WebGPU operations before aborting.
+    constexpr auto WGPU_ASYNC_TIMEOUT = std::chrono::seconds(10);
 
     // Feature bitmask for pipeline caching
     enum PipelineFeatures : uint32_t {
@@ -437,11 +442,18 @@ struct DawnRenderer::Impl {
 
         wgpuInstanceRequestAdapter(instance, &options, callbackInfo);
 
-        // Poll until callback fires
+        // Poll until callback fires, with timeout
+        auto deadline = std::chrono::steady_clock::now() + WGPU_ASYNC_TIMEOUT;
         while (!userData.done) {
+            if (std::chrono::steady_clock::now() > deadline) {
+                throw std::runtime_error("DawnRenderer: requestAdapter timed out");
+            }
             wgpuInstanceProcessEvents(instance);
         }
 
+        if (!userData.adapter) {
+            throw std::runtime_error("DawnRenderer: failed to obtain adapter");
+        }
         adapter = userData.adapter;
     }
 
@@ -472,10 +484,17 @@ struct DawnRenderer::Impl {
 
         wgpuAdapterRequestDevice(adapter, &deviceDesc, callbackInfo);
 
+        auto deadline = std::chrono::steady_clock::now() + WGPU_ASYNC_TIMEOUT;
         while (!userData.done) {
+            if (std::chrono::steady_clock::now() > deadline) {
+                throw std::runtime_error("DawnRenderer: requestDevice timed out");
+            }
             wgpuInstanceProcessEvents(instance);
         }
 
+        if (!userData.device) {
+            throw std::runtime_error("DawnRenderer: failed to obtain device");
+        }
         device = userData.device;
     }
 
@@ -484,8 +503,8 @@ struct DawnRenderer::Impl {
         config.device = device;
         config.format = surfaceFormat;
         config.usage = WGPUTextureUsage_RenderAttachment;
-        config.width = static_cast<uint32_t>(size_.width());
-        config.height = static_cast<uint32_t>(size_.height());
+        config.width = static_cast<uint32_t>(std::floor(size_.width() * pixelRatio_));
+        config.height = static_cast<uint32_t>(std::floor(size_.height() * pixelRatio_));
         config.presentMode = WGPUPresentMode_Fifo;
         config.alphaMode = WGPUCompositeAlphaMode_Auto;
         config.viewFormatCount = 0;
@@ -1327,6 +1346,7 @@ WindowSize DawnRenderer::size() const {
 void DawnRenderer::setSize(const std::pair<int, int>& size) {
     pimpl_->canvas.setSize(size);
     pimpl_->size_ = {size.first, size.second};
+    setViewport(0, 0, size.first, size.second);
     if (pimpl_->initialized) {
         pimpl_->configureSurface();
     }
@@ -1338,6 +1358,7 @@ float DawnRenderer::getTargetPixelRatio() const {
 
 void DawnRenderer::setPixelRatio(float value) {
     pimpl_->pixelRatio_ = value;
+    setSize({pimpl_->size_.width(), pimpl_->size_.height()});
 }
 
 void DawnRenderer::setViewport(const Vector4& v) {
@@ -1346,10 +1367,11 @@ void DawnRenderer::setViewport(const Vector4& v) {
 }
 
 void DawnRenderer::setViewport(int x, int y, int width, int height) {
-    pimpl_->viewport_.x = static_cast<float>(x);
-    pimpl_->viewport_.y = static_cast<float>(y);
-    pimpl_->viewport_.w = static_cast<float>(width);
-    pimpl_->viewport_.h = static_cast<float>(height);
+    float pr = pimpl_->pixelRatio_;
+    pimpl_->viewport_.x = std::floor(x * pr);
+    pimpl_->viewport_.y = std::floor(y * pr);
+    pimpl_->viewport_.w = std::floor(width * pr);
+    pimpl_->viewport_.h = std::floor(height * pr);
 }
 
 void DawnRenderer::setScissor(const Vector4& v) {
@@ -1360,10 +1382,11 @@ void DawnRenderer::setScissor(const Vector4& v) {
 }
 
 void DawnRenderer::setScissor(int x, int y, int width, int height) {
-    pimpl_->scissor_.x = static_cast<uint32_t>(x);
-    pimpl_->scissor_.y = static_cast<uint32_t>(y);
-    pimpl_->scissor_.w = static_cast<uint32_t>(width);
-    pimpl_->scissor_.h = static_cast<uint32_t>(height);
+    float pr = pimpl_->pixelRatio_;
+    pimpl_->scissor_.x = static_cast<uint32_t>(std::floor(x * pr));
+    pimpl_->scissor_.y = static_cast<uint32_t>(std::floor(y * pr));
+    pimpl_->scissor_.w = static_cast<uint32_t>(std::floor(width * pr));
+    pimpl_->scissor_.h = static_cast<uint32_t>(std::floor(height * pr));
 }
 
 void DawnRenderer::setScissorTest(bool boolean) {
@@ -1441,7 +1464,14 @@ std::vector<unsigned char> DawnRenderer::readRGBPixels() {
     mapCb.userdata1 = &mapData;
     wgpuBufferMapAsync(stagingBuf, WGPUMapMode_Read, 0, bufferSize, mapCb);
 
+    auto deadline = std::chrono::steady_clock::now() + WGPU_ASYNC_TIMEOUT;
     while (!mapData.done) {
+        if (std::chrono::steady_clock::now() > deadline) {
+            wgpuBufferRelease(stagingBuf);
+            wgpuCommandBufferRelease(cmd);
+            wgpuCommandEncoderRelease(encoder);
+            throw std::runtime_error("DawnRenderer: readRGBPixels buffer map timed out");
+        }
         wgpuDevicePoll(pimpl_->device, true, nullptr);
     }
 

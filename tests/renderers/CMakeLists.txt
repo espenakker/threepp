@@ -8,10 +8,10 @@ if (THREEPP_WITH_DAWN)
     target_link_libraries(CrossRenderer_test PRIVATE threepp Catch2::Catch2WithMain)
     target_include_directories(CrossRenderer_test PRIVATE
             "${PROJECT_SOURCE_DIR}/src"
-            "${PROJECT_SOURCE_DIR}/src/external/wgpu-native/include"
+            "${WGPU_INCLUDE_DIR}"
     )
     target_link_libraries(CrossRenderer_test PRIVATE
-            "${PROJECT_SOURCE_DIR}/src/external/wgpu-native/lib/libwgpu_native.a"
+            "${WGPU_LIBRARY}"
     )
     target_compile_definitions(CrossRenderer_test PRIVATE DATA_FOLDER="${PROJECT_SOURCE_DIR}/data")
 
