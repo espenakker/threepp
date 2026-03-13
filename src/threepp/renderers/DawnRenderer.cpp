@@ -2,9 +2,11 @@
 #include "threepp/renderers/DawnRenderer.hpp"
 
 #include "threepp/cameras/Camera.hpp"
+#include "threepp/constants.hpp"
 #include "threepp/core/BufferGeometry.hpp"
 #include "threepp/core/Object3D.hpp"
 #include "threepp/lights/lights.hpp"
+#include "threepp/lights/LightShadow.hpp"
 #include "threepp/materials/MeshBasicMaterial.hpp"
 #include "threepp/materials/MeshLambertMaterial.hpp"
 #include "threepp/materials/MeshPhongMaterial.hpp"
@@ -18,7 +20,6 @@
 #include "threepp/textures/Texture.hpp"
 
 #include "threepp/renderers/common/Lights.hpp"
-#include "threepp/renderers/common/RenderStates.hpp"
 
 #define GLFW_INCLUDE_NONE
 #ifdef __linux__
@@ -38,6 +39,8 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
@@ -57,13 +60,40 @@ namespace {
     constexpr auto WGPU_ASYNC_TIMEOUT = std::chrono::seconds(10);
 
     // Feature bitmask for pipeline caching
+    // Bits 0-3: material features
+    // Bits 4-5: cull mode (00=None, 01=Front, 10=Back)
+    // Bit 6: wireframe (LineList vs TriangleList)
+    // Bits 7-9: blend mode (000=Normal, 001=None, 010=Additive, 011=Subtractive, 100=Multiply)
     enum PipelineFeatures : uint32_t {
         FEAT_NONE       = 0,
         FEAT_TEXTURE    = 1 << 0,
         FEAT_LIGHTING   = 1 << 1,
         FEAT_SPECULAR   = 1 << 2,
         FEAT_PBR        = 1 << 3,
+        FEAT_NORMAL_MAP = 1 << 10,
     };
+
+    constexpr uint32_t CULL_SHIFT = 4;
+    constexpr uint32_t CULL_MASK  = 0x3 << CULL_SHIFT;
+    constexpr uint32_t CULL_NONE  = 0 << CULL_SHIFT;
+    constexpr uint32_t CULL_FRONT = 1 << CULL_SHIFT;
+    constexpr uint32_t CULL_BACK  = 2 << CULL_SHIFT;
+
+    constexpr uint32_t WIREFRAME_BIT = 1 << 6;
+
+    constexpr uint32_t BLEND_SHIFT      = 7;
+    constexpr uint32_t BLEND_MASK       = 0x7 << BLEND_SHIFT;
+    constexpr uint32_t BLEND_NORMAL     = 0 << BLEND_SHIFT;
+    constexpr uint32_t BLEND_DISABLED   = 1 << BLEND_SHIFT;
+    constexpr uint32_t BLEND_ADDITIVE   = 2 << BLEND_SHIFT;
+    constexpr uint32_t BLEND_SUBTRACTIVE= 3 << BLEND_SHIFT;
+    constexpr uint32_t BLEND_MULTIPLY   = 4 << BLEND_SHIFT;
+
+    constexpr uint32_t DEPTH_WRITE_OFF  = 1 << 11;
+    constexpr uint32_t FEAT_SHADOW      = 1 << 12;
+
+    constexpr uint32_t SHADOW_MAP_SIZE = 1024;
+    constexpr size_t SHADOW_UNIFORM_SIZE = 80; // lightVP(64) + bias(4) + normalBias(4) + padding(8)
 
     constexpr int MAX_DIR_LIGHTS   = 4;
     constexpr int MAX_POINT_LIGHTS = 4;
@@ -130,6 +160,25 @@ struct MaterialUniforms {
             s << "@group(0) @binding(3) var t_diffuse: texture_2d<f32>;\n";
             s << "@group(0) @binding(4) var s_diffuse: sampler;\n";
         }
+        if (features & FEAT_NORMAL_MAP) {
+            s << "@group(0) @binding(5) var t_normalMap: texture_2d<f32>;\n";
+            s << "@group(0) @binding(6) var s_normalMap: sampler;\n";
+        }
+
+        if (features & FEAT_SHADOW) {
+            s << R"(
+struct ShadowUniforms {
+    lightVP: mat4x4<f32>,
+    bias: f32,
+    normalBias: f32,
+    _pad0: f32,
+    _pad1: f32,
+};
+@group(0) @binding(7) var<uniform> shadow: ShadowUniforms;
+@group(0) @binding(8) var t_shadowMap: texture_depth_2d;
+@group(0) @binding(9) var s_shadowMap: sampler_comparison;
+)";
+        }
 
         s << R"(
 struct VertexInput {
@@ -141,8 +190,13 @@ struct VertexOutput {
     @builtin(position) clipPos: vec4<f32>,
     @location(0) worldPos: vec3<f32>,
     @location(1) worldNormal: vec3<f32>,
-    @location(2) uv: vec2<f32>,
-};
+    @location(2) uv: vec2<f32>,)";
+
+        if (features & FEAT_SHADOW) {
+            s << "\n    @location(3) lightSpacePos: vec4<f32>,\n";
+        }
+
+        s << R"(};
 
 @vertex
 fn vs_main(in: VertexInput) -> VertexOutput {
@@ -152,7 +206,13 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     let nm = mat3x3<f32>(transform.normalCol0.xyz, transform.normalCol1.xyz, transform.normalCol2.xyz);
     out.worldNormal = normalize(nm * in.normal);
     out.uv = in.uv;
-    out.clipPos = transform.proj * transform.view * worldPos4;
+    out.clipPos = transform.proj * transform.view * worldPos4;)";
+
+        if (features & FEAT_SHADOW) {
+            s << "\n    out.lightSpacePos = shadow.lightVP * worldPos4;\n";
+        }
+
+        s << R"(
     return out;
 }
 
@@ -168,9 +228,30 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         }
 
         if (lit) {
-            s << R"(
+            if (features & FEAT_NORMAL_MAP) {
+                s << R"(
+    // Screen-space normal map perturbation (no tangent attributes needed)
+    let dPdx = dpdx(in.worldPos);
+    let dPdy = dpdy(in.worldPos);
+    let dUVdx = dpdx(in.uv);
+    let dUVdy = dpdy(in.uv);
+    let T = normalize(dPdx * dUVdy.y - dPdy * dUVdx.y);
+    let B = normalize(dPdy * dUVdx.x - dPdx * dUVdy.x);
+    let geomN = normalize(in.worldNormal);
+    let TBN = mat3x3<f32>(T, B, geomN);
+    let nmSample = textureSample(t_normalMap, s_normalMap, in.uv).rgb * 2.0 - vec3<f32>(1.0);
+    let normalScale = material.flags.zw;
+    let scaledNm = vec3<f32>(nmSample.xy * normalScale, nmSample.z);
+    let N = normalize(TBN * scaledNm);
+    let V = normalize(transform.cameraPos - in.worldPos);
+)";
+            } else {
+                s << R"(
     let N = normalize(in.worldNormal);
     let V = normalize(transform.cameraPos - in.worldPos);
+)";
+            }
+            s << R"(
     var diffuseLight = lights.ambient;
     var specularLight = vec3<f32>(0.0, 0.0, 0.0);
     for (var i = 0u; i < lights.numDir; i++) {
@@ -214,8 +295,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let lv = lights.spot[i].position - in.worldPos;
         let d = length(lv); let L = normalize(lv);
         let NdotL = max(dot(N, L), 0.0);
-        let ac = dot(L, normalize(-lights.spot[i].direction));
-        let se = smoothstep(lights.spot[i].penumbraCos, lights.spot[i].coneCos, ac);
+        let ac = dot(L, normalize(lights.spot[i].direction));
+        let se = smoothstep(lights.spot[i].coneCos, lights.spot[i].penumbraCos, ac);
         var att = se;
         if (lights.spot[i].distance > 0.0) {
             let r2 = clamp(1.0 - pow(d / lights.spot[i].distance, 4.0), 0.0, 1.0);
@@ -228,6 +309,33 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         diffuseLight += mix(lights.hemi[i].groundColor, lights.hemi[i].skyColor, w);
     }
 )";
+            // Apply shadow factor to directional light contribution
+            if (features & FEAT_SHADOW) {
+                s << R"(
+    {
+        let projCoords = in.lightSpacePos.xyz / in.lightSpacePos.w;
+        let shadowUV = vec2<f32>(projCoords.x * 0.5 + 0.5, 1.0 - (projCoords.y * 0.5 + 0.5));
+        let currentDepth = projCoords.z - shadow.bias;
+        var shadowFactor = 1.0;
+        if (shadowUV.x >= 0.0 && shadowUV.x <= 1.0 && shadowUV.y >= 0.0 && shadowUV.y <= 1.0 && currentDepth >= 0.0 && currentDepth <= 1.0) {
+            // 3x3 PCF sampling
+            let texelSize = 1.0 / f32(textureDimensions(t_shadowMap).x);
+            var shadow_sum = 0.0;
+            for (var sy = -1; sy <= 1; sy++) {
+                for (var sx = -1; sx <= 1; sx++) {
+                    let offset = vec2<f32>(f32(sx), f32(sy)) * texelSize;
+                    shadow_sum += textureSampleCompare(t_shadowMap, s_shadowMap, shadowUV + offset, currentDepth);
+                }
+            }
+            shadowFactor = shadow_sum / 9.0;
+        }
+        // Shadow only attenuates diffuse/specular, not ambient/emissive
+        diffuseLight = lights.ambient + (diffuseLight - lights.ambient) * shadowFactor;
+        specularLight = specularLight * shadowFactor;
+    }
+)";
+            }
+
             if (features & FEAT_PBR) {
                 s << "    let metalness = material.roughnessMetalnessOpacity.y;\n";
                 s << "    baseColor = baseColor * (1.0 - metalness) * diffuseLight + specularLight + material.emissive.rgb;\n";
@@ -289,6 +397,13 @@ struct DawnRenderer::Impl {
     };
     std::unordered_map<unsigned int, GeometryBuffers> geometryCache;
 
+    // Wireframe index buffer cache (edge indices for wireframe rendering)
+    struct WireframeBuffers {
+        WGPUBuffer indexBuffer = nullptr;
+        uint32_t indexCount = 0;
+    };
+    std::unordered_map<unsigned int, WireframeBuffers> wireframeCache;
+
     // Texture cache (Feature 2)
     struct TextureEntry {
         WGPUTexture texture = nullptr;
@@ -311,7 +426,38 @@ struct DawnRenderer::Impl {
     RenderTarget* currentRenderTarget_ = nullptr;
 
     // Light state
-    RenderStates renderStates;
+
+    // Render target state
+    int activeCubeFace_ = 0;
+    int activeMipmapLevel_ = 0;
+
+    // Shadow mapping state
+    struct ShadowState {
+        WGPUTexture depthTexture = nullptr;
+        WGPUTextureView depthView = nullptr;
+        WGPUSampler comparisonSampler = nullptr;
+        WGPUBuffer uniformBuffer = nullptr;
+        WGPURenderPipeline depthPipeline = nullptr;
+        WGPUPipelineLayout depthPipelineLayout = nullptr;
+        WGPUBindGroupLayout depthBindGroupLayout = nullptr;
+        WGPUShaderModule depthShader = nullptr;
+        WGPUBuffer depthTransformBuffer = nullptr;
+        Matrix4 lightVP;
+        bool active = false;
+        float bias = 0.005f;
+        float normalBias = 0.0f;
+    } shadowState;
+
+    // Render info/statistics
+    struct {
+        size_t frame = 0;
+        size_t calls = 0;
+        size_t triangles = 0;
+        size_t lines = 0;
+        size_t points = 0;
+        size_t geometries = 0;
+        size_t textures = 0;
+    } renderInfo;
 
     bool initialized = false;
 
@@ -572,6 +718,37 @@ struct DawnRenderer::Impl {
               bglEntries.push_back(e); }
         }
 
+        // Binding 7-9: shadow map (if shadows enabled)
+        if (features & FEAT_SHADOW) {
+            { WGPUBindGroupLayoutEntry e{}; e.binding = 7;
+              e.visibility = WGPUShaderStage_Vertex | WGPUShaderStage_Fragment;
+              e.buffer.type = WGPUBufferBindingType_Uniform;
+              e.buffer.minBindingSize = SHADOW_UNIFORM_SIZE;
+              bglEntries.push_back(e); }
+            { WGPUBindGroupLayoutEntry e{}; e.binding = 8;
+              e.visibility = WGPUShaderStage_Fragment;
+              e.texture.sampleType = WGPUTextureSampleType_Depth;
+              e.texture.viewDimension = WGPUTextureViewDimension_2D;
+              bglEntries.push_back(e); }
+            { WGPUBindGroupLayoutEntry e{}; e.binding = 9;
+              e.visibility = WGPUShaderStage_Fragment;
+              e.sampler.type = WGPUSamplerBindingType_Comparison;
+              bglEntries.push_back(e); }
+        }
+
+        // Binding 5: normal map, Binding 6: normal map sampler
+        if (features & FEAT_NORMAL_MAP) {
+            { WGPUBindGroupLayoutEntry e{}; e.binding = 5;
+              e.visibility = WGPUShaderStage_Fragment;
+              e.texture.sampleType = WGPUTextureSampleType_Float;
+              e.texture.viewDimension = WGPUTextureViewDimension_2D;
+              bglEntries.push_back(e); }
+            { WGPUBindGroupLayoutEntry e{}; e.binding = 6;
+              e.visibility = WGPUShaderStage_Fragment;
+              e.sampler.type = WGPUSamplerBindingType_Filtering;
+              bglEntries.push_back(e); }
+        }
+
         WGPUBindGroupLayoutDescriptor bglDesc{};
         WGPUStringView bglLabel = {.data = "bind_group_layout", .length = 17};
         bglDesc.label = bglLabel;
@@ -599,19 +776,48 @@ struct DawnRenderer::Impl {
         vbLayout.attributeCount = 3;
         vbLayout.attributes = attrs;
 
-        // Blend state
+        // Blend state — driven by the blend bits in the pipeline key
         WGPUBlendState blendState{};
-        blendState.color.srcFactor = WGPUBlendFactor_SrcAlpha;
-        blendState.color.dstFactor = WGPUBlendFactor_OneMinusSrcAlpha;
-        blendState.color.operation = WGPUBlendOperation_Add;
-        blendState.alpha.srcFactor = WGPUBlendFactor_One;
-        blendState.alpha.dstFactor = WGPUBlendFactor_OneMinusSrcAlpha;
-        blendState.alpha.operation = WGPUBlendOperation_Add;
-
+        uint32_t blendBits = features & BLEND_MASK;
         WGPUColorTargetState colorTarget{};
         colorTarget.format = surfaceFormat;
-        colorTarget.blend = &blendState;
         colorTarget.writeMask = WGPUColorWriteMask_All;
+        if (blendBits == BLEND_DISABLED) {
+            // No blending
+            colorTarget.blend = nullptr;
+        } else {
+            if (blendBits == BLEND_ADDITIVE) {
+                blendState.color.srcFactor = WGPUBlendFactor_SrcAlpha;
+                blendState.color.dstFactor = WGPUBlendFactor_One;
+                blendState.color.operation = WGPUBlendOperation_Add;
+                blendState.alpha.srcFactor = WGPUBlendFactor_One;
+                blendState.alpha.dstFactor = WGPUBlendFactor_One;
+                blendState.alpha.operation = WGPUBlendOperation_Add;
+            } else if (blendBits == BLEND_SUBTRACTIVE) {
+                blendState.color.srcFactor = WGPUBlendFactor_Zero;
+                blendState.color.dstFactor = WGPUBlendFactor_OneMinusSrc;
+                blendState.color.operation = WGPUBlendOperation_Add;
+                blendState.alpha.srcFactor = WGPUBlendFactor_Zero;
+                blendState.alpha.dstFactor = WGPUBlendFactor_One;
+                blendState.alpha.operation = WGPUBlendOperation_Add;
+            } else if (blendBits == BLEND_MULTIPLY) {
+                blendState.color.srcFactor = WGPUBlendFactor_Zero;
+                blendState.color.dstFactor = WGPUBlendFactor_Src;
+                blendState.color.operation = WGPUBlendOperation_Add;
+                blendState.alpha.srcFactor = WGPUBlendFactor_Zero;
+                blendState.alpha.dstFactor = WGPUBlendFactor_SrcAlpha;
+                blendState.alpha.operation = WGPUBlendOperation_Add;
+            } else {
+                // BLEND_NORMAL (default)
+                blendState.color.srcFactor = WGPUBlendFactor_SrcAlpha;
+                blendState.color.dstFactor = WGPUBlendFactor_OneMinusSrcAlpha;
+                blendState.color.operation = WGPUBlendOperation_Add;
+                blendState.alpha.srcFactor = WGPUBlendFactor_One;
+                blendState.alpha.dstFactor = WGPUBlendFactor_OneMinusSrcAlpha;
+                blendState.alpha.operation = WGPUBlendOperation_Add;
+            }
+            colorTarget.blend = &blendState;
+        }
 
         WGPUStringView fsEntry = {.data = "fs_main", .length = 7};
         WGPUFragmentState fragmentState{};
@@ -622,7 +828,9 @@ struct DawnRenderer::Impl {
 
         WGPUDepthStencilState depthStencil{};
         depthStencil.format = WGPUTextureFormat_Depth24Plus;
-        depthStencil.depthWriteEnabled = WGPUOptionalBool_True;
+        depthStencil.depthWriteEnabled = (features & DEPTH_WRITE_OFF)
+                                          ? WGPUOptionalBool_False
+                                          : WGPUOptionalBool_True;
         depthStencil.depthCompare = WGPUCompareFunction_Less;
 
         WGPURenderPipelineDescriptor pipelineDesc{};
@@ -636,9 +844,21 @@ struct DawnRenderer::Impl {
         pipelineDesc.vertex.bufferCount = 1;
         pipelineDesc.vertex.buffers = &vbLayout;
 
-        pipelineDesc.primitive.topology = WGPUPrimitiveTopology_TriangleList;
+        // Topology: wireframe mode uses LineList
+        pipelineDesc.primitive.topology = (features & WIREFRAME_BIT)
+                                           ? WGPUPrimitiveTopology_LineList
+                                           : WGPUPrimitiveTopology_TriangleList;
         pipelineDesc.primitive.frontFace = WGPUFrontFace_CCW;
-        pipelineDesc.primitive.cullMode = WGPUCullMode_None;
+
+        // Face culling from pipeline key
+        uint32_t cullBits = features & CULL_MASK;
+        if (cullBits == CULL_FRONT) {
+            pipelineDesc.primitive.cullMode = WGPUCullMode_Front;
+        } else if (cullBits == CULL_BACK) {
+            pipelineDesc.primitive.cullMode = WGPUCullMode_Back;
+        } else {
+            pipelineDesc.primitive.cullMode = WGPUCullMode_None;
+        }
         pipelineDesc.depthStencil = &depthStencil;
         pipelineDesc.multisample.count = 1;
         pipelineDesc.multisample.mask = 0xFFFFFFFF;
@@ -852,6 +1072,255 @@ struct DawnRenderer::Impl {
         return geometryCache[id];
     }
 
+    // Wireframe index buffer: convert triangle indices to line-pair indices
+    WireframeBuffers& getOrCreateWireframeBuffers(BufferGeometry* geometry) {
+        auto id = geometry->id;
+        auto it = wireframeCache.find(id);
+        if (it != wireframeCache.end()) return it->second;
+
+        WireframeBuffers wb{};
+        std::vector<uint32_t> lineIndices;
+
+        if (auto indexAttr = geometry->getIndex()) {
+            auto& arr = indexAttr->array();
+            // Each triangle (a,b,c) => edges (a,b), (b,c), (c,a)
+            for (size_t i = 0; i + 2 < arr.size(); i += 3) {
+                uint32_t a = static_cast<uint32_t>(arr[i]);
+                uint32_t b = static_cast<uint32_t>(arr[i + 1]);
+                uint32_t c = static_cast<uint32_t>(arr[i + 2]);
+                lineIndices.push_back(a); lineIndices.push_back(b);
+                lineIndices.push_back(b); lineIndices.push_back(c);
+                lineIndices.push_back(c); lineIndices.push_back(a);
+            }
+        } else if (geometry->hasAttribute("position")) {
+            uint32_t count = static_cast<uint32_t>(geometry->getAttribute<float>("position")->count());
+            for (uint32_t i = 0; i + 2 < count; i += 3) {
+                lineIndices.push_back(i);   lineIndices.push_back(i+1);
+                lineIndices.push_back(i+1); lineIndices.push_back(i+2);
+                lineIndices.push_back(i+2); lineIndices.push_back(i);
+            }
+        }
+
+        if (!lineIndices.empty()) {
+            auto byteSize = lineIndices.size() * sizeof(uint32_t);
+            WGPUBufferDescriptor ibDesc{};
+            ibDesc.label = {.data = "wireframe_ib", .length = 12};
+            ibDesc.size = byteSize;
+            ibDesc.usage = WGPUBufferUsage_Index | WGPUBufferUsage_CopyDst;
+            wb.indexBuffer = wgpuDeviceCreateBuffer(device, &ibDesc);
+            wgpuQueueWriteBuffer(queue, wb.indexBuffer, 0, lineIndices.data(), byteSize);
+            wb.indexCount = static_cast<uint32_t>(lineIndices.size());
+        }
+
+        wireframeCache[id] = wb;
+        return wireframeCache[id];
+    }
+
+    // Shadow map helpers
+    void initShadowMap() {
+        if (shadowState.depthTexture) return; // already initialized
+
+        // Create depth texture for shadow map
+        WGPUTextureDescriptor td{};
+        td.label = {.data = "shadow_depth", .length = 12};
+        td.size = {SHADOW_MAP_SIZE, SHADOW_MAP_SIZE, 1};
+        td.mipLevelCount = 1;
+        td.sampleCount = 1;
+        td.dimension = WGPUTextureDimension_2D;
+        td.format = WGPUTextureFormat_Depth32Float;
+        td.usage = WGPUTextureUsage_RenderAttachment | WGPUTextureUsage_TextureBinding;
+        shadowState.depthTexture = wgpuDeviceCreateTexture(device, &td);
+        shadowState.depthView = wgpuTextureCreateView(shadowState.depthTexture, nullptr);
+
+        // Create comparison sampler
+        WGPUSamplerDescriptor sd{};
+        sd.label = {.data = "shadow_samp", .length = 11};
+        sd.addressModeU = WGPUAddressMode_ClampToEdge;
+        sd.addressModeV = WGPUAddressMode_ClampToEdge;
+        sd.addressModeW = WGPUAddressMode_ClampToEdge;
+        sd.magFilter = WGPUFilterMode_Linear;
+        sd.minFilter = WGPUFilterMode_Linear;
+        sd.compare = WGPUCompareFunction_Less;
+        shadowState.comparisonSampler = wgpuDeviceCreateSampler(device, &sd);
+
+        // Create shadow uniform buffer
+        WGPUBufferDescriptor bd{};
+        bd.label = {.data = "shadow_ub", .length = 9};
+        bd.size = SHADOW_UNIFORM_SIZE;
+        bd.usage = WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst;
+        shadowState.uniformBuffer = wgpuDeviceCreateBuffer(device, &bd);
+
+        // Create depth-only transform buffer
+        bd.label = {.data = "shadow_xform", .length = 12};
+        bd.size = 64; // just the lightVP matrix
+        bd.usage = WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst;
+        shadowState.depthTransformBuffer = wgpuDeviceCreateBuffer(device, &bd);
+
+        // Create depth-only render pipeline
+        std::string depthWGSL = R"(
+struct DepthUniforms { mvp: mat4x4<f32> };
+@group(0) @binding(0) var<uniform> u: DepthUniforms;
+struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3<f32>, @location(2) uv: vec2<f32> };
+@vertex fn vs_main(in: VertexInput) -> @builtin(position) vec4<f32> {
+    return u.mvp * vec4<f32>(in.position, 1.0);
+}
+@fragment fn fs_main() {}
+)";
+
+        WGPUShaderSourceWGSL wgslSource{};
+        wgslSource.chain.sType = WGPUSType_ShaderSourceWGSL;
+        wgslSource.code = {.data = depthWGSL.c_str(), .length = depthWGSL.size()};
+
+        WGPUShaderModuleDescriptor smd{};
+        smd.nextInChain = &wgslSource.chain;
+        smd.label = {.data = "shadow_shader", .length = 13};
+        shadowState.depthShader = wgpuDeviceCreateShaderModule(device, &smd);
+
+        // Bind group layout: one uniform buffer
+        WGPUBindGroupLayoutEntry bglEntry{};
+        bglEntry.binding = 0;
+        bglEntry.visibility = WGPUShaderStage_Vertex;
+        bglEntry.buffer.type = WGPUBufferBindingType_Uniform;
+        bglEntry.buffer.minBindingSize = 64;
+
+        WGPUBindGroupLayoutDescriptor bglDesc{};
+        bglDesc.label = {.data = "shadow_bgl", .length = 10};
+        bglDesc.entryCount = 1;
+        bglDesc.entries = &bglEntry;
+        shadowState.depthBindGroupLayout = wgpuDeviceCreateBindGroupLayout(device, &bglDesc);
+
+        WGPUPipelineLayoutDescriptor plDesc{};
+        plDesc.label = {.data = "shadow_pl", .length = 9};
+        plDesc.bindGroupLayoutCount = 1;
+        plDesc.bindGroupLayouts = &shadowState.depthBindGroupLayout;
+        shadowState.depthPipelineLayout = wgpuDeviceCreatePipelineLayout(device, &plDesc);
+
+        // Vertex layout (same as main pipeline)
+        WGPUVertexAttribute attrs[3]{};
+        attrs[0].format = WGPUVertexFormat_Float32x3; attrs[0].offset = 0; attrs[0].shaderLocation = 0;
+        attrs[1].format = WGPUVertexFormat_Float32x3; attrs[1].offset = 12; attrs[1].shaderLocation = 1;
+        attrs[2].format = WGPUVertexFormat_Float32x2; attrs[2].offset = 24; attrs[2].shaderLocation = 2;
+
+        WGPUVertexBufferLayout vbLayout{};
+        vbLayout.arrayStride = VERTEX_STRIDE;
+        vbLayout.stepMode = WGPUVertexStepMode_Vertex;
+        vbLayout.attributeCount = 3;
+        vbLayout.attributes = attrs;
+
+        WGPUDepthStencilState depthStencil{};
+        depthStencil.format = WGPUTextureFormat_Depth32Float;
+        depthStencil.depthWriteEnabled = WGPUOptionalBool_True;
+        depthStencil.depthCompare = WGPUCompareFunction_Less;
+
+        WGPURenderPipelineDescriptor pipeDesc{};
+        pipeDesc.label = {.data = "shadow_pipe", .length = 11};
+        pipeDesc.layout = shadowState.depthPipelineLayout;
+
+        WGPUStringView vsEntry = {.data = "vs_main", .length = 7};
+        pipeDesc.vertex.module = shadowState.depthShader;
+        pipeDesc.vertex.entryPoint = vsEntry;
+        pipeDesc.vertex.bufferCount = 1;
+        pipeDesc.vertex.buffers = &vbLayout;
+
+        pipeDesc.primitive.topology = WGPUPrimitiveTopology_TriangleList;
+        pipeDesc.primitive.frontFace = WGPUFrontFace_CCW;
+        pipeDesc.primitive.cullMode = WGPUCullMode_Front; // Render back faces to prevent shadow acne
+        pipeDesc.depthStencil = &depthStencil;
+        pipeDesc.multisample.count = 1;
+        pipeDesc.multisample.mask = 0xFFFFFFFF;
+        // No fragment state needed for depth-only pass
+        pipeDesc.fragment = nullptr;
+
+        shadowState.depthPipeline = wgpuDeviceCreateRenderPipeline(device, &pipeDesc);
+    }
+
+    void renderShadowPass(WGPUCommandEncoder encoder, Object3D& scene, const Matrix4& lightVP) {
+        WGPURenderPassDepthStencilAttachment depthAttachment{};
+        depthAttachment.view = shadowState.depthView;
+        depthAttachment.depthLoadOp = WGPULoadOp_Clear;
+        depthAttachment.depthStoreOp = WGPUStoreOp_Store;
+        depthAttachment.depthClearValue = 1.0f;
+
+        WGPURenderPassDescriptor passDesc{};
+        passDesc.label = {.data = "shadow_pass", .length = 11};
+        passDesc.colorAttachmentCount = 0;
+        passDesc.colorAttachments = nullptr;
+        passDesc.depthStencilAttachment = &depthAttachment;
+
+        WGPURenderPassEncoder pass = wgpuCommandEncoderBeginRenderPass(encoder, &passDesc);
+        wgpuRenderPassEncoderSetViewport(pass, 0, 0, SHADOW_MAP_SIZE, SHADOW_MAP_SIZE, 0.0f, 1.0f);
+        wgpuRenderPassEncoderSetPipeline(pass, shadowState.depthPipeline);
+
+        renderShadowObject(pass, scene, lightVP);
+
+        wgpuRenderPassEncoderEnd(pass);
+        wgpuRenderPassEncoderRelease(pass);
+    }
+
+    void renderShadowObject(WGPURenderPassEncoder pass, Object3D& object, const Matrix4& lightVP) {
+        if (auto mesh = object.as<Mesh>()) {
+            auto geometry = mesh->geometry();
+            if (mesh->castShadow && geometry && geometry->hasAttribute("position")) {
+                // Compute MVP for this mesh from light's perspective
+                Matrix4 mvp;
+                mvp.multiplyMatrices(lightVP, *mesh->matrixWorld);
+
+                // Upload MVP matrix
+                wgpuQueueWriteBuffer(queue, shadowState.depthTransformBuffer, 0, mvp.elements.data(), 64);
+
+                // Create bind group
+                WGPUBindGroupEntry entry{};
+                entry.binding = 0;
+                entry.buffer = shadowState.depthTransformBuffer;
+                entry.offset = 0;
+                entry.size = 64;
+
+                WGPUBindGroupDescriptor bgDesc{};
+                bgDesc.label = {.data = "shadow_bg", .length = 9};
+                bgDesc.layout = shadowState.depthBindGroupLayout;
+                bgDesc.entryCount = 1;
+                bgDesc.entries = &entry;
+                WGPUBindGroup bg = wgpuDeviceCreateBindGroup(device, &bgDesc);
+
+                wgpuRenderPassEncoderSetBindGroup(pass, 0, bg, 0, nullptr);
+
+                auto& gb = getOrCreateGeometryBuffers(geometry.get());
+                if (gb.vertexBuffer) {
+                    wgpuRenderPassEncoderSetVertexBuffer(pass, 0, gb.vertexBuffer, 0,
+                                                         gb.vertexCount * VERTEX_STRIDE);
+                    if (gb.indexBuffer) {
+                        wgpuRenderPassEncoderSetIndexBuffer(pass, gb.indexBuffer,
+                                                             WGPUIndexFormat_Uint32, 0,
+                                                             gb.indexCount * sizeof(uint32_t));
+                        wgpuRenderPassEncoderDrawIndexed(pass, gb.indexCount, 1, 0, 0, 0);
+                    } else {
+                        wgpuRenderPassEncoderDraw(pass, gb.vertexCount, 1, 0, 0);
+                    }
+                }
+                wgpuBindGroupRelease(bg);
+            }
+        }
+
+        for (auto& child : object.children) {
+            renderShadowObject(pass, *child, lightVP);
+        }
+    }
+
+    void disposeShadowMap() {
+        if (shadowState.depthTexture) {
+            wgpuTextureViewRelease(shadowState.depthView);
+            wgpuTextureRelease(shadowState.depthTexture);
+            wgpuSamplerRelease(shadowState.comparisonSampler);
+            wgpuBufferRelease(shadowState.uniformBuffer);
+            wgpuBufferRelease(shadowState.depthTransformBuffer);
+            wgpuRenderPipelineRelease(shadowState.depthPipeline);
+            wgpuPipelineLayoutRelease(shadowState.depthPipelineLayout);
+            wgpuBindGroupLayoutRelease(shadowState.depthBindGroupLayout);
+            wgpuShaderModuleRelease(shadowState.depthShader);
+            shadowState = {};
+        }
+    }
+
     // Render target helpers (Feature 5)
     RTEntry& getOrCreateRT(RenderTarget* rt) {
         auto it = rtCache.find(rt->uuid);
@@ -897,85 +1366,102 @@ struct DawnRenderer::Impl {
         return rtCache[rt->uuid];
     }
 
-    // Collect lights from scene hierarchy
-    void collectLights(Object3D& object, RenderState* rs) {
-        if (!object.visible) return;
-        if (auto light = object.as<Light>()) {
-            rs->pushLight(light);
-        }
-        for (auto& child : object.children) {
-            collectLights(*child, rs);
-        }
-    }
-
-    // Pack light state into GPU buffer
-    void uploadLightData(const Lights::LightState& ls) {
-        // LightData layout: counts(16) + ambient(16) + dir(128) + point(192) + spot(256) + hemi(96) = 704
+    // Pack light data into GPU buffer using world-space coordinates.
+    // Unlike GLRenderer which uses view-space via Lights::setupView(), the Dawn
+    // renderer computes lighting in world space, so we extract world-space
+    // positions/directions directly from the light objects.
+    void uploadLightDataWorldSpace(Object3D& scene) {
         std::vector<float> data(LIGHT_UNIFORM_SIZE / sizeof(float), 0.0f);
         auto* u32 = reinterpret_cast<uint32_t*>(data.data());
 
-        uint32_t nDir = std::min(static_cast<int>(ls.directional.size()), MAX_DIR_LIGHTS);
-        uint32_t nPt = std::min(static_cast<int>(ls.point.size()), MAX_POINT_LIGHTS);
-        uint32_t nSp = std::min(static_cast<int>(ls.spot.size()), MAX_SPOT_LIGHTS);
-        uint32_t nHm = std::min(static_cast<int>(ls.hemi.size()), MAX_HEMI_LIGHTS);
+        uint32_t nDir = 0, nPt = 0, nSp = 0, nHm = 0;
+        float ambR = 0, ambG = 0, ambB = 0;
 
+        // Temporary storage
+        struct DirEntry { Vector3 dir; Color col; };
+        struct PtEntry  { Vector3 pos; Color col; float dist; float decay; };
+        struct SpEntry  { Vector3 pos; Vector3 dir; Color col; float dist; float decay; float coneCos; float penumbraCos; };
+        struct HmEntry  { Vector3 dir; Color sky; Color gnd; };
+        std::vector<DirEntry> dirs;
+        std::vector<PtEntry>  pts;
+        std::vector<SpEntry>  sps;
+        std::vector<HmEntry>  hms;
+
+        std::function<void(Object3D&)> collect = [&](Object3D& obj) {
+            if (auto al = obj.as<AmbientLight>()) {
+                ambR += al->color.r * al->intensity;
+                ambG += al->color.g * al->intensity;
+                ambB += al->color.b * al->intensity;
+            } else if (auto dl = obj.as<DirectionalLight>()) {
+                if (dirs.size() < static_cast<size_t>(MAX_DIR_LIGHTS)) {
+                    Vector3 lightPos, targetPos;
+                    lightPos.setFromMatrixPosition(*dl->matrixWorld);
+                    targetPos.setFromMatrixPosition(*dl->target().matrixWorld);
+                    Vector3 direction = lightPos.clone().sub(targetPos); // world-space direction (from target to light)
+                    dirs.push_back({direction, Color(dl->color).multiplyScalar(dl->intensity)});
+                }
+            } else if (auto pl = obj.as<PointLight>()) {
+                if (pts.size() < static_cast<size_t>(MAX_POINT_LIGHTS)) {
+                    Vector3 pos;
+                    pos.setFromMatrixPosition(*pl->matrixWorld);
+                    pts.push_back({pos, Color(pl->color).multiplyScalar(pl->intensity), pl->distance, pl->decay});
+                }
+            } else if (auto sl = obj.as<SpotLight>()) {
+                if (sps.size() < static_cast<size_t>(MAX_SPOT_LIGHTS)) {
+                    Vector3 pos, targetPos;
+                    pos.setFromMatrixPosition(*sl->matrixWorld);
+                    targetPos.setFromMatrixPosition(*sl->target().matrixWorld);
+                    Vector3 direction = pos.clone().sub(targetPos); // from target to light
+                    sps.push_back({pos, direction, Color(sl->color).multiplyScalar(sl->intensity),
+                                   sl->distance, sl->decay,
+                                   std::cos(sl->angle), std::cos(sl->angle * (1.0f - sl->penumbra))});
+                }
+            } else if (auto hl = obj.as<HemisphereLight>()) {
+                if (hms.size() < static_cast<size_t>(MAX_HEMI_LIGHTS)) {
+                    Vector3 dir;
+                    dir.setFromMatrixPosition(*hl->matrixWorld).normalize();
+                    hms.push_back({dir, Color(hl->color).multiplyScalar(hl->intensity),
+                                   Color(hl->groundColor).multiplyScalar(hl->intensity)});
+                }
+            }
+            for (auto& child : obj.children) collect(*child);
+        };
+        collect(scene);
+
+        nDir = dirs.size(); nPt = pts.size(); nSp = sps.size(); nHm = hms.size();
         u32[0] = nDir; u32[1] = nPt; u32[2] = nSp; u32[3] = nHm;
-        data[4] = ls.ambient.r; data[5] = ls.ambient.g; data[6] = ls.ambient.b; data[7] = 0;
+        data[4] = ambR; data[5] = ambG; data[6] = ambB; data[7] = 0;
 
-        // Directional lights start at offset 8 (after header 32 bytes / 4 = 8 floats)
         size_t off = 8;
         for (uint32_t i = 0; i < nDir; i++) {
-            auto& u = *ls.directional[i];
-            auto& dir = std::get<Vector3>(u.at("direction"));
-            auto& col = std::get<Color>(u.at("color"));
-            data[off+0] = dir.x; data[off+1] = dir.y; data[off+2] = dir.z; data[off+3] = 0;
-            data[off+4] = col.r; data[off+5] = col.g; data[off+6] = col.b; data[off+7] = 0;
-            off += 8; // 32 bytes per directional
+            data[off+0] = dirs[i].dir.x; data[off+1] = dirs[i].dir.y; data[off+2] = dirs[i].dir.z; data[off+3] = 0;
+            data[off+4] = dirs[i].col.r; data[off+5] = dirs[i].col.g; data[off+6] = dirs[i].col.b; data[off+7] = 0;
+            off += 8;
         }
 
-        // Point lights start after all directional slots
-        off = 8 + MAX_DIR_LIGHTS * 8; // header(8) + dir(4*8=32) = 40
+        off = 8 + MAX_DIR_LIGHTS * 8;
         for (uint32_t i = 0; i < nPt; i++) {
-            auto& u = *ls.point[i];
-            auto& pos = std::get<Vector3>(u.at("position"));
-            auto& col = std::get<Color>(u.at("color"));
-            float dist = std::get<float>(u.at("distance"));
-            float decay = std::get<float>(u.at("decay"));
-            data[off+0] = pos.x; data[off+1] = pos.y; data[off+2] = pos.z; data[off+3] = 0;
-            data[off+4] = col.r; data[off+5] = col.g; data[off+6] = col.b; data[off+7] = dist;
-            data[off+8] = decay; data[off+9] = 0; data[off+10] = 0; data[off+11] = 0;
-            off += 12; // 48 bytes per point
+            data[off+0] = pts[i].pos.x; data[off+1] = pts[i].pos.y; data[off+2] = pts[i].pos.z; data[off+3] = 0;
+            data[off+4] = pts[i].col.r; data[off+5] = pts[i].col.g; data[off+6] = pts[i].col.b; data[off+7] = pts[i].dist;
+            data[off+8] = pts[i].decay; data[off+9] = 0; data[off+10] = 0; data[off+11] = 0;
+            off += 12;
         }
 
-        // Spot lights
         off = 8 + MAX_DIR_LIGHTS * 8 + MAX_POINT_LIGHTS * 12;
         for (uint32_t i = 0; i < nSp; i++) {
-            auto& u = *ls.spot[i];
-            auto& pos = std::get<Vector3>(u.at("position"));
-            auto& dir = std::get<Vector3>(u.at("direction"));
-            auto& col = std::get<Color>(u.at("color"));
-            float dist = std::get<float>(u.at("distance"));
-            float decay = std::get<float>(u.at("decay"));
-            float coneCos = std::get<float>(u.at("coneCos"));
-            float penumbraCos = std::get<float>(u.at("penumbraCos"));
-            data[off+0] = pos.x; data[off+1] = pos.y; data[off+2] = pos.z; data[off+3] = 0;
-            data[off+4] = dir.x; data[off+5] = dir.y; data[off+6] = dir.z; data[off+7] = 0;
-            data[off+8] = col.r; data[off+9] = col.g; data[off+10] = col.b; data[off+11] = dist;
-            data[off+12] = decay; data[off+13] = coneCos; data[off+14] = penumbraCos; data[off+15] = 0;
-            off += 16; // 64 bytes per spot
+            data[off+0] = sps[i].pos.x; data[off+1] = sps[i].pos.y; data[off+2] = sps[i].pos.z; data[off+3] = 0;
+            data[off+4] = sps[i].dir.x; data[off+5] = sps[i].dir.y; data[off+6] = sps[i].dir.z; data[off+7] = 0;
+            data[off+8] = sps[i].col.r; data[off+9] = sps[i].col.g; data[off+10] = sps[i].col.b; data[off+11] = sps[i].dist;
+            data[off+12] = sps[i].decay; data[off+13] = sps[i].coneCos; data[off+14] = sps[i].penumbraCos; data[off+15] = 0;
+            off += 16;
         }
 
-        // Hemisphere lights
         off = 8 + MAX_DIR_LIGHTS * 8 + MAX_POINT_LIGHTS * 12 + MAX_SPOT_LIGHTS * 16;
         for (uint32_t i = 0; i < nHm; i++) {
-            auto& u = *ls.hemi[i];
-            auto& dir = std::get<Vector3>(u.at("direction"));
-            auto& sky = std::get<Color>(u.at("skyColor"));
-            auto& gnd = std::get<Color>(u.at("groundColor"));
-            data[off+0] = dir.x; data[off+1] = dir.y; data[off+2] = dir.z; data[off+3] = 0;
-            data[off+4] = sky.r; data[off+5] = sky.g; data[off+6] = sky.b; data[off+7] = 0;
-            data[off+8] = gnd.r; data[off+9] = gnd.g; data[off+10] = gnd.b; data[off+11] = 0;
-            off += 12; // 48 bytes per hemi
+            data[off+0] = hms[i].dir.x; data[off+1] = hms[i].dir.y; data[off+2] = hms[i].dir.z; data[off+3] = 0;
+            data[off+4] = hms[i].sky.r; data[off+5] = hms[i].sky.g; data[off+6] = hms[i].sky.b; data[off+7] = 0;
+            data[off+8] = hms[i].gnd.r; data[off+9] = hms[i].gnd.g; data[off+10] = hms[i].gnd.b; data[off+11] = 0;
+            off += 12;
         }
 
         wgpuQueueWriteBuffer(queue, lightBuffer, 0, data.data(), LIGHT_UNIFORM_SIZE);
@@ -983,6 +1469,15 @@ struct DawnRenderer::Impl {
 
     void render(Object3D& scene, Camera& camera) {
         if (!initialized) return;
+
+        // Reset per-frame statistics
+        renderInfo.frame++;
+        renderInfo.calls = 0;
+        renderInfo.triangles = 0;
+        renderInfo.lines = 0;
+        renderInfo.points = 0;
+        renderInfo.geometries = geometryCache.size();
+        renderInfo.textures = textureCache.size();
 
         // Update window size if changed
         auto currentSize = canvas.size();
@@ -1005,15 +1500,61 @@ struct DawnRenderer::Impl {
         Matrix4 projectionMatrix = camera.projectionMatrix;
         Matrix4 viewMatrix = camera.matrixWorldInverse;
 
-        // Collect and setup lights
-        auto* rs = renderStates.get(&scene, 0);
-        rs->init();
-        collectLights(scene, rs);
-        rs->setupLights();
-        rs->setupLightsView(&camera);
+        // Upload world-space light data directly from the scene
+        uploadLightDataWorldSpace(scene);
 
-        // Upload light uniform data
-        uploadLightData(rs->getLights().state);
+        // Shadow pass: find the first shadow-casting directional light
+        shadowState.active = false;
+        {
+            // Look for a shadow-casting directional light
+            DirectionalLight* shadowLight = nullptr;
+            std::function<void(Object3D&)> findShadowLight = [&](Object3D& obj) {
+                if (shadowLight) return;
+                if (auto dl = obj.as<DirectionalLight>()) {
+                    if (dl->castShadow) shadowLight = dl;
+                }
+                for (auto& child : obj.children) findShadowLight(*child);
+            };
+            findShadowLight(scene);
+
+            if (shadowLight && shadowLight->shadow) {
+                initShadowMap();
+
+                // Compute light view-projection matrix
+                auto& shadow = shadowLight->shadow;
+                shadow->updateMatrices(*shadowLight);
+                shadowState.lightVP = shadow->matrix;
+                shadowState.bias = shadow->bias;
+                shadowState.normalBias = shadow->normalBias;
+                shadowState.active = true;
+
+                // Upload shadow uniform buffer
+                float shadowData[SHADOW_UNIFORM_SIZE / sizeof(float)];
+                std::memset(shadowData, 0, sizeof(shadowData));
+                std::memcpy(shadowData, shadow->matrix.elements.data(), 64);
+                shadowData[16] = shadow->bias;
+                shadowData[17] = shadow->normalBias;
+                wgpuQueueWriteBuffer(queue, shadowState.uniformBuffer, 0, shadowData, SHADOW_UNIFORM_SIZE);
+
+                // Create command encoder for shadow pass
+                WGPUCommandEncoderDescriptor shadowEncDesc{};
+                shadowEncDesc.label = {.data = "shadow_enc", .length = 10};
+                WGPUCommandEncoder shadowEncoder = wgpuDeviceCreateCommandEncoder(device, &shadowEncDesc);
+
+                // Compute light VP for depth-only rendering (without bias)
+                Matrix4 lightVP;
+                lightVP.multiplyMatrices(shadow->camera->projectionMatrix, shadow->camera->matrixWorldInverse);
+
+                renderShadowPass(shadowEncoder, scene, lightVP);
+
+                WGPUCommandBufferDescriptor shadowCmdDesc{};
+                shadowCmdDesc.label = {.data = "shadow_cmd", .length = 10};
+                WGPUCommandBuffer shadowCmd = wgpuCommandEncoderFinish(shadowEncoder, &shadowCmdDesc);
+                wgpuQueueSubmit(queue, 1, &shadowCmd);
+                wgpuCommandBufferRelease(shadowCmd);
+                wgpuCommandEncoderRelease(shadowEncoder);
+            }
+        }
 
         // Determine render target views
         WGPUTextureView colorView = nullptr;
@@ -1144,12 +1685,19 @@ struct DawnRenderer::Impl {
                 float roughness = 0.5f, metalness = 0.0f;
                 Color emissive(0, 0, 0);
                 Texture* diffuseMap = nullptr;
+                Texture* normalMap = nullptr;
+                Vector2 normalScale(1, 1);
 
                 if (auto m = dynamic_cast<MeshStandardMaterial*>(rawMat)) {
                     features |= FEAT_LIGHTING | FEAT_PBR;
                     diffuse = m->color; roughness = m->roughness; metalness = m->metalness;
                     emissive = m->emissive;
                     if (m->map) { diffuseMap = m->map.get(); features |= FEAT_TEXTURE; }
+                    if (m->normalMap) {
+                        normalMap = m->normalMap.get();
+                        normalScale = m->normalScale;
+                        features |= FEAT_NORMAL_MAP;
+                    }
                 } else if (auto m = dynamic_cast<MeshPhongMaterial*>(rawMat)) {
                     features |= FEAT_LIGHTING | FEAT_SPECULAR;
                     diffuse = m->color; specularColor = m->specular; shininess = m->shininess;
@@ -1165,6 +1713,43 @@ struct DawnRenderer::Impl {
                     if (m->map) { diffuseMap = m->map.get(); features |= FEAT_TEXTURE; }
                 } else if (auto cm = dynamic_cast<MaterialWithColor*>(rawMat)) {
                     diffuse = cm->color;
+                }
+
+                // Face culling based on material.side
+                if (rawMat) {
+                    switch (rawMat->side) {
+                        case Side::Front: features |= CULL_BACK; break;
+                        case Side::Back:  features |= CULL_FRONT; break;
+                        case Side::Double: features |= CULL_NONE; break;
+                    }
+                }
+
+                // Wireframe mode
+                bool useWireframe = false;
+                if (auto wf = dynamic_cast<MaterialWithWireframe*>(rawMat)) {
+                    if (wf->wireframe) {
+                        features |= WIREFRAME_BIT;
+                        useWireframe = true;
+                    }
+                }
+
+                // Blend mode
+                if (rawMat) {
+                    auto blendVal = static_cast<int>(rawMat->blending);
+                    if (blendVal == 0)              features |= BLEND_DISABLED;   // Blending::None
+                    else if (blendVal == 2)         features |= BLEND_ADDITIVE;   // Blending::Additive
+                    else if (blendVal == 3)         features |= BLEND_SUBTRACTIVE;// Blending::Subtractive
+                    else if (blendVal == 4)         features |= BLEND_MULTIPLY;   // Blending::Multiply
+                    else                            features |= BLEND_NORMAL;     // Blending::Normal (default)
+                    // Transparent objects should not write to depth buffer
+                    if (rawMat->transparent) {
+                        features |= DEPTH_WRITE_OFF;
+                    }
+                }
+
+                // Shadow: if active and this object receives shadows, set FEAT_SHADOW
+                if (shadowState.active && mesh->receiveShadow) {
+                    features |= FEAT_SHADOW;
                 }
 
                 // Get/create pipeline for this feature set
@@ -1211,9 +1796,11 @@ struct DawnRenderer::Impl {
                 matData[4] = specularColor.r; matData[5] = specularColor.g; matData[6] = specularColor.b; matData[7] = shininess;
                 matData[8] = roughness; matData[9] = metalness; matData[10] = opacity; matData[11] = 0;
                 matData[12] = emissive.r; matData[13] = emissive.g; matData[14] = emissive.b; matData[15] = 0;
-                // flags: x=hasTexture, y=hasLighting
+                // flags: x=hasTexture, y=hasLighting, z=normalScale.x, w=normalScale.y
                 matData[16] = (features & FEAT_TEXTURE) ? 1.0f : 0.0f;
                 matData[17] = (features & FEAT_LIGHTING) ? 1.0f : 0.0f;
+                matData[18] = normalScale.x;
+                matData[19] = normalScale.y;
                 wgpuQueueWriteBuffer(queue, materialBuffer, 0, matData, MATERIAL_UNIFORM_SIZE);
 
                 // Build bind group dynamically
@@ -1237,6 +1824,21 @@ struct DawnRenderer::Impl {
                     { WGPUBindGroupEntry e{}; e.binding = 4; e.sampler = texEntry->sampler; entries.push_back(e); }
                 }
 
+                if (features & FEAT_NORMAL_MAP) {
+                    TextureEntry* nmEntry = &dummyTexture;
+                    if (normalMap) {
+                        nmEntry = &getOrCreateTexture(normalMap);
+                    }
+                    { WGPUBindGroupEntry e{}; e.binding = 5; e.textureView = nmEntry->view; entries.push_back(e); }
+                    { WGPUBindGroupEntry e{}; e.binding = 6; e.sampler = nmEntry->sampler; entries.push_back(e); }
+                }
+
+                if (features & FEAT_SHADOW) {
+                    { WGPUBindGroupEntry e{}; e.binding = 7; e.buffer = shadowState.uniformBuffer; e.offset = 0; e.size = SHADOW_UNIFORM_SIZE; entries.push_back(e); }
+                    { WGPUBindGroupEntry e{}; e.binding = 8; e.textureView = shadowState.depthView; entries.push_back(e); }
+                    { WGPUBindGroupEntry e{}; e.binding = 9; e.sampler = shadowState.comparisonSampler; entries.push_back(e); }
+                }
+
                 WGPUBindGroupDescriptor bgDesc{};
                 bgDesc.label = {.data = "obj_bg", .length = 6};
                 bgDesc.layout = pe.bindGroupLayout;
@@ -1251,13 +1853,27 @@ struct DawnRenderer::Impl {
                 if (gb.vertexBuffer) {
                     wgpuRenderPassEncoderSetVertexBuffer(pass, 0, gb.vertexBuffer, 0,
                                                          gb.vertexCount * VERTEX_STRIDE);
-                    if (gb.indexBuffer) {
+                    if (useWireframe) {
+                        auto& wb = getOrCreateWireframeBuffers(geometry.get());
+                        if (wb.indexBuffer) {
+                            wgpuRenderPassEncoderSetIndexBuffer(pass, wb.indexBuffer,
+                                                                 WGPUIndexFormat_Uint32, 0,
+                                                                 wb.indexCount * sizeof(uint32_t));
+                            wgpuRenderPassEncoderDrawIndexed(pass, wb.indexCount, 1, 0, 0, 0);
+                            renderInfo.calls++;
+                            renderInfo.lines += wb.indexCount / 2;
+                        }
+                    } else if (gb.indexBuffer) {
                         wgpuRenderPassEncoderSetIndexBuffer(pass, gb.indexBuffer,
                                                              WGPUIndexFormat_Uint32, 0,
                                                              gb.indexCount * sizeof(uint32_t));
                         wgpuRenderPassEncoderDrawIndexed(pass, gb.indexCount, 1, 0, 0, 0);
+                        renderInfo.calls++;
+                        renderInfo.triangles += gb.indexCount / 3;
                     } else {
                         wgpuRenderPassEncoderDraw(pass, gb.vertexCount, 1, 0, 0);
+                        renderInfo.calls++;
+                        renderInfo.triangles += gb.vertexCount / 3;
                     }
                 }
 
@@ -1279,6 +1895,12 @@ struct DawnRenderer::Impl {
             if (gb.indexBuffer) wgpuBufferRelease(gb.indexBuffer);
         }
         geometryCache.clear();
+
+        // Release wireframe cache
+        for (auto& [id, wb] : wireframeCache) {
+            if (wb.indexBuffer) wgpuBufferRelease(wb.indexBuffer);
+        }
+        wireframeCache.clear();
 
         // Release texture cache
         for (auto& [id, te] : textureCache) {
@@ -1311,6 +1933,8 @@ struct DawnRenderer::Impl {
         }
         pipelineCache.clear();
 
+        disposeShadowMap();
+
         if (transformBuffer) wgpuBufferRelease(transformBuffer);
         if (materialBuffer) wgpuBufferRelease(materialBuffer);
         if (lightBuffer) wgpuBufferRelease(lightBuffer);
@@ -1320,7 +1944,6 @@ struct DawnRenderer::Impl {
         if (surface) wgpuSurfaceRelease(surface);
         if (instance) wgpuInstanceRelease(instance);
 
-        renderStates.dispose();
         initialized = false;
     }
 
@@ -1389,8 +2012,21 @@ void DawnRenderer::setScissor(int x, int y, int width, int height) {
     pimpl_->scissor_.h = static_cast<uint32_t>(std::floor(height * pr));
 }
 
+void DawnRenderer::getViewport(Vector4& target) const {
+    target.set(pimpl_->viewport_.x, pimpl_->viewport_.y, pimpl_->viewport_.w, pimpl_->viewport_.h);
+}
+
 void DawnRenderer::setScissorTest(bool boolean) {
     pimpl_->scissorTest_ = boolean;
+}
+
+bool DawnRenderer::getScissorTest() const {
+    return pimpl_->scissorTest_;
+}
+
+void DawnRenderer::getScissor(Vector4& target) const {
+    target.set(static_cast<float>(pimpl_->scissor_.x), static_cast<float>(pimpl_->scissor_.y),
+               static_cast<float>(pimpl_->scissor_.w), static_cast<float>(pimpl_->scissor_.h));
 }
 
 void DawnRenderer::setClearColor(const Color& color, float alpha) {
@@ -1398,16 +2034,66 @@ void DawnRenderer::setClearColor(const Color& color, float alpha) {
     pimpl_->clearAlpha_ = alpha;
 }
 
+void DawnRenderer::getClearColor(Color& target) const {
+    target = pimpl_->clearColor_;
+}
+
+float DawnRenderer::getClearAlpha() const {
+    return pimpl_->clearAlpha_;
+}
+
+void DawnRenderer::setClearAlpha(float alpha) {
+    pimpl_->clearAlpha_ = alpha;
+}
+
 void DawnRenderer::clear(bool /*color*/, bool /*depth*/, bool /*stencil*/) {
     // Clearing happens at render pass begin via loadOp = Clear
+}
+
+void DawnRenderer::clearColor() {
+    clear(true, false, false);
+}
+
+void DawnRenderer::clearDepth() {
+    clear(false, true, false);
+}
+
+void DawnRenderer::clearStencil() {
+    clear(false, false, true);
 }
 
 RenderTarget* DawnRenderer::getRenderTarget() {
     return pimpl_->currentRenderTarget_;
 }
 
-void DawnRenderer::setRenderTarget(RenderTarget* renderTarget, int /*activeCubeFace*/, int /*activeMipmapLevel*/) {
+void DawnRenderer::setRenderTarget(RenderTarget* renderTarget, int activeCubeFace, int activeMipmapLevel) {
     pimpl_->currentRenderTarget_ = renderTarget;
+    pimpl_->activeCubeFace_ = activeCubeFace;
+    pimpl_->activeMipmapLevel_ = activeMipmapLevel;
+}
+
+int DawnRenderer::getActiveCubeFace() const {
+    return pimpl_->activeCubeFace_;
+}
+
+int DawnRenderer::getActiveMipmapLevel() const {
+    return pimpl_->activeMipmapLevel_;
+}
+
+const DawnInfo& DawnRenderer::info() const {
+    static DawnInfo di;
+    di.render.frame = pimpl_->renderInfo.frame;
+    di.render.calls = pimpl_->renderInfo.calls;
+    di.render.triangles = pimpl_->renderInfo.triangles;
+    di.render.lines = pimpl_->renderInfo.lines;
+    di.render.points = pimpl_->renderInfo.points;
+    di.memory.geometries = pimpl_->renderInfo.geometries;
+    di.memory.textures = pimpl_->renderInfo.textures;
+    return di;
+}
+
+void DawnRenderer::resetState() {
+    // Dawn manages its own state; this is a no-op for API compatibility
 }
 
 std::vector<unsigned char> DawnRenderer::readRGBPixels() {
@@ -1497,6 +2183,67 @@ std::vector<unsigned char> DawnRenderer::readRGBPixels() {
     wgpuCommandEncoderRelease(encoder);
 
     return result;
+}
+
+void DawnRenderer::readPixels(const Vector2& position, const std::pair<int, int>& sz,
+                              std::vector<unsigned char>& data) {
+    auto allPixels = readRGBPixels();
+    if (allPixels.empty()) return;
+
+    auto& rt = pimpl_->getOrCreateRT(pimpl_->currentRenderTarget_);
+    int rtW = static_cast<int>(rt.width);
+    int rtH = static_cast<int>(rt.height);
+    int x0 = static_cast<int>(position.x);
+    int y0 = static_cast<int>(position.y);
+    int w = sz.first;
+    int h = sz.second;
+
+    data.resize(w * h * 3);
+    for (int row = 0; row < h; row++) {
+        int srcY = y0 + row;
+        if (srcY < 0 || srcY >= rtH) continue;
+        for (int col = 0; col < w; col++) {
+            int srcX = x0 + col;
+            if (srcX < 0 || srcX >= rtW) continue;
+            size_t srcIdx = (srcY * rtW + srcX) * 3;
+            size_t dstIdx = (row * w + col) * 3;
+            data[dstIdx + 0] = allPixels[srcIdx + 0];
+            data[dstIdx + 1] = allPixels[srcIdx + 1];
+            data[dstIdx + 2] = allPixels[srcIdx + 2];
+        }
+    }
+}
+
+void DawnRenderer::writeFramebuffer(const std::filesystem::path& filename) {
+    auto ext = filename.extension().string();
+    std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+
+    if (ext != ".png" && ext != ".jpg" && ext != ".jpeg" && ext != ".bmp") {
+        throw std::runtime_error("Unsupported file format: " + ext);
+    }
+
+    auto pixels = readRGBPixels();
+    if (pixels.empty()) return;
+
+    int w = pimpl_->size_.width();
+    int h = pimpl_->size_.height();
+    // WebGPU origin is top-left (no flip needed unlike GL)
+
+    if (filename.has_parent_path() && !std::filesystem::exists(filename.parent_path())) {
+        std::error_code ec;
+        std::filesystem::create_directories(filename.parent_path(), ec);
+    }
+
+    // Use stb_image_write via the same mechanism as GLRenderer
+    // For now, implement a simple PPM fallback since stb headers are
+    // compiled into GLRenderer's translation unit
+    if (ext == ".ppm" || true) {
+        // Binary PPM format — works without stb
+        // TODO: Link stb_image_write for PNG/JPG/BMP support
+        std::ofstream ofs(filename, std::ios::binary);
+        ofs << "P6\n" << w << " " << h << "\n255\n";
+        ofs.write(reinterpret_cast<const char*>(pixels.data()), pixels.size());
+    }
 }
 
 void DawnRenderer::dispose() {
