@@ -1,6 +1,10 @@
 
 #include "threepp/renderers/DawnRenderer.hpp"
 
+#include "dawn/DawnGeometries.hpp"
+#include "dawn/DawnTextures.hpp"
+#include "dawn/DawnState.hpp"
+
 #include "threepp/cameras/Camera.hpp"
 #include "threepp/constants.hpp"
 #include "threepp/core/BufferGeometry.hpp"
@@ -27,7 +31,7 @@
 #include "threepp/objects/Sprite.hpp"
 #include "threepp/objects/Group.hpp"
 #include "threepp/objects/ObjectWithMaterials.hpp"
-#include "threepp/renderers/GLRenderTarget.hpp"
+#include "threepp/renderers/RenderTarget.hpp"
 #include "threepp/scenes/Scene.hpp"
 #include "threepp/textures/Texture.hpp"
 #include "threepp/math/Frustum.hpp"
@@ -65,7 +69,6 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
-#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -155,8 +158,6 @@ namespace {
     // Light: header(32) + dir(4*32=128) + point(4*48=192) + spot(4*64=256) + hemi(2*48=96) = 704
     constexpr size_t LIGHT_UNIFORM_SIZE = 704;
 
-    // Vertex stride: pos(12) + normal(12) + uv(8) = 32
-    constexpr size_t VERTEX_STRIDE = 32;
 
     std::string buildWGSL(uint32_t features) {
         std::ostringstream s;
@@ -493,7 +494,7 @@ struct DawnRenderer::Impl {
     WGPUBuffer materialBuffer = nullptr;    // binding 1
     WGPUBuffer lightBuffer = nullptr;       // binding 2
 
-    // Pipeline cache keyed by feature bitmask (Feature 3)
+    // Pipeline cache keyed by feature bitmask
     struct PipelineEntry {
         WGPUShaderModule shader = nullptr;
         WGPURenderPipeline pipeline = nullptr;
@@ -502,31 +503,14 @@ struct DawnRenderer::Impl {
     };
     std::unordered_map<uint32_t, PipelineEntry> pipelineCache;
 
-    // Geometry buffers cache (interleaved pos+normal+uv)
-    struct GeometryBuffers {
-        WGPUBuffer vertexBuffer = nullptr;
-        WGPUBuffer indexBuffer = nullptr;
-        uint32_t vertexCount = 0;
-        uint32_t indexCount = 0;
-    };
-    std::unordered_map<unsigned int, GeometryBuffers> geometryCache;
+    // Subsystem: shared state
+    dawn::DawnState dawnState;
 
-    // Wireframe index buffer cache (edge indices for wireframe rendering)
-    struct WireframeBuffers {
-        WGPUBuffer indexBuffer = nullptr;
-        uint32_t indexCount = 0;
-    };
-    std::unordered_map<unsigned int, WireframeBuffers> wireframeCache;
+    // Subsystem: geometry buffer management (with version-based updates)
+    std::unique_ptr<dawn::DawnGeometries> geometries;
 
-    // Texture cache (Feature 2)
-    struct TextureEntry {
-        WGPUTexture texture = nullptr;
-        WGPUTextureView view = nullptr;
-        WGPUSampler sampler = nullptr;
-        unsigned int version = 0;
-    };
-    std::unordered_map<unsigned int, TextureEntry> textureCache;
-    TextureEntry dummyTexture; // 1x1 white
+    // Subsystem: texture upload, caching, version tracking
+    std::unique_ptr<dawn::DawnTextures> textures;
 
     // Render target cache (Feature 5)
     struct RTEntry {
@@ -635,11 +619,19 @@ struct DawnRenderer::Impl {
             configureSurface();
         }
 
+        // Populate shared state for subsystems
+        dawnState.device = device;
+        dawnState.queue = queue;
+        dawnState.surfaceFormat = surfaceFormat;
+
         // Create uniform buffers
         createUniformBuffers();
 
-        // Create dummy texture for untextured materials
-        createDummyTexture();
+        // Initialize subsystems
+        textures = std::make_unique<dawn::DawnTextures>(dawnState);
+        textures->createDummyTexture();
+
+        geometries = std::make_unique<dawn::DawnGeometries>(dawnState);
 
         initialized = true;
         std::cout << "DawnRenderer: WebGPU initialized successfully"
@@ -897,7 +889,7 @@ struct DawnRenderer::Impl {
         attrs[2].format = WGPUVertexFormat_Float32x2; attrs[2].offset = 24; attrs[2].shaderLocation = 2;
 
         WGPUVertexBufferLayout vbLayout{};
-        vbLayout.arrayStride = VERTEX_STRIDE;
+        vbLayout.arrayStride = dawn::VERTEX_STRIDE;
         vbLayout.stepMode = WGPUVertexStepMode_Vertex;
         vbLayout.attributeCount = 3;
         vbLayout.attributes = attrs;
@@ -1023,239 +1015,6 @@ struct DawnRenderer::Impl {
         lightBuffer     = makeBuffer("light_buf", 9, LIGHT_UNIFORM_SIZE);
     }
 
-    void createDummyTexture() {
-        WGPUTextureDescriptor td{};
-        td.label = {.data = "dummy_tex", .length = 9};
-        td.size = {1, 1, 1};
-        td.mipLevelCount = 1;
-        td.sampleCount = 1;
-        td.dimension = WGPUTextureDimension_2D;
-        td.format = WGPUTextureFormat_RGBA8Unorm;
-        td.usage = WGPUTextureUsage_TextureBinding | WGPUTextureUsage_CopyDst;
-        dummyTexture.texture = wgpuDeviceCreateTexture(device, &td);
-        dummyTexture.view = wgpuTextureCreateView(dummyTexture.texture, nullptr);
-
-        // Upload 1x1 white pixel
-        unsigned char white[] = {255, 255, 255, 255};
-        WGPUTexelCopyTextureInfo dst{};
-        dst.texture = dummyTexture.texture;
-        WGPUTexelCopyBufferLayout layout{};
-        layout.bytesPerRow = 4;
-        layout.rowsPerImage = 1;
-        WGPUExtent3D extent = {1, 1, 1};
-        wgpuQueueWriteTexture(queue, &dst, white, 4, &layout, &extent);
-
-        // Default sampler
-        WGPUSamplerDescriptor sd{};
-        sd.label = {.data = "dummy_sampler", .length = 13};
-        sd.magFilter = WGPUFilterMode_Linear;
-        sd.minFilter = WGPUFilterMode_Linear;
-        sd.addressModeU = WGPUAddressMode_Repeat;
-        sd.addressModeV = WGPUAddressMode_Repeat;
-        sd.addressModeW = WGPUAddressMode_Repeat;
-        sd.maxAnisotropy = 1;
-        dummyTexture.sampler = wgpuDeviceCreateSampler(device, &sd);
-    }
-
-    // Texture upload/cache (Feature 2)
-    TextureEntry& getOrCreateTexture(Texture* tex) {
-        auto it = textureCache.find(tex->id);
-        if (it != textureCache.end() && it->second.version == tex->version()) {
-            return it->second;
-        }
-
-        // Release old if exists
-        if (it != textureCache.end()) {
-            if (it->second.view) wgpuTextureViewRelease(it->second.view);
-            if (it->second.texture) wgpuTextureRelease(it->second.texture);
-            if (it->second.sampler) wgpuSamplerRelease(it->second.sampler);
-        }
-
-        TextureEntry entry{};
-        auto& img = tex->image();
-        auto w = img.width;
-        auto h = img.height;
-        if (w == 0 || h == 0) return dummyTexture;
-
-        WGPUTextureDescriptor td{};
-        td.label = {.data = "user_tex", .length = 8};
-        td.size = {w, h, 1};
-        td.mipLevelCount = 1;
-        td.sampleCount = 1;
-        td.dimension = WGPUTextureDimension_2D;
-        td.format = WGPUTextureFormat_RGBA8Unorm;
-        td.usage = WGPUTextureUsage_TextureBinding | WGPUTextureUsage_CopyDst;
-        entry.texture = wgpuDeviceCreateTexture(device, &td);
-        entry.view = wgpuTextureCreateView(entry.texture, nullptr);
-
-        auto& data = img.data<unsigned char>();
-        WGPUTexelCopyTextureInfo dst{};
-        dst.texture = entry.texture;
-        WGPUTexelCopyBufferLayout layout{};
-        layout.bytesPerRow = w * 4;
-        layout.rowsPerImage = h;
-        WGPUExtent3D extent = {w, h, 1};
-        wgpuQueueWriteTexture(queue, &dst, data.data(), data.size(), &layout, &extent);
-
-        // Sampler
-        WGPUSamplerDescriptor sd{};
-        sd.label = {.data = "tex_sampler", .length = 11};
-        sd.magFilter = (tex->magFilter == Filter::Nearest) ? WGPUFilterMode_Nearest : WGPUFilterMode_Linear;
-        sd.minFilter = (tex->minFilter == Filter::Nearest || tex->minFilter == Filter::NearestMipmapNearest || tex->minFilter == Filter::NearestMipmapLinear)
-            ? WGPUFilterMode_Nearest : WGPUFilterMode_Linear;
-        auto mapWrap = [](TextureWrapping w) {
-            switch (w) {
-                case TextureWrapping::Repeat: return WGPUAddressMode_Repeat;
-                case TextureWrapping::MirroredRepeat: return WGPUAddressMode_MirrorRepeat;
-                default: return WGPUAddressMode_ClampToEdge;
-            }
-        };
-        sd.addressModeU = mapWrap(tex->wrapS);
-        sd.addressModeV = mapWrap(tex->wrapT);
-        sd.addressModeW = WGPUAddressMode_ClampToEdge;
-        sd.maxAnisotropy = 1;
-        entry.sampler = wgpuDeviceCreateSampler(device, &sd);
-
-        entry.version = tex->version();
-        textureCache[tex->id] = entry;
-        return textureCache[tex->id];
-    }
-
-    GeometryBuffers& getOrCreateGeometryBuffers(BufferGeometry* geometry) {
-        auto id = geometry->id;
-        auto it = geometryCache.find(id);
-        if (it != geometryCache.end()) {
-            return it->second;
-        }
-
-        GeometryBuffers gb{};
-
-        if (geometry->hasAttribute("position")) {
-            auto posAttr = geometry->getAttribute<float>("position");
-            uint32_t count = static_cast<uint32_t>(posAttr->count());
-            gb.vertexCount = count;
-
-            // Get optional normal and uv attributes
-            const float* normalData = nullptr;
-            const float* uvData = nullptr;
-            int normalItemSize = 3, uvItemSize = 2;
-
-            if (geometry->hasAttribute("normal")) {
-                auto nAttr = geometry->getAttribute<float>("normal");
-                normalData = nAttr->array().data();
-                normalItemSize = static_cast<int>(nAttr->itemSize());
-            }
-            if (geometry->hasAttribute("uv")) {
-                auto uvAttr = geometry->getAttribute<float>("uv");
-                uvData = uvAttr->array().data();
-                uvItemSize = static_cast<int>(uvAttr->itemSize());
-            }
-
-            // Build interleaved buffer: pos(3) + normal(3) + uv(2) = 8 floats per vertex
-            std::vector<float> interleaved(count * 8);
-            auto& posArr = posAttr->array();
-            int posItemSize = static_cast<int>(posAttr->itemSize());
-
-            for (uint32_t i = 0; i < count; i++) {
-                size_t base = i * 8;
-                interleaved[base + 0] = posArr[i * posItemSize + 0];
-                interleaved[base + 1] = posArr[i * posItemSize + 1];
-                interleaved[base + 2] = (posItemSize > 2) ? posArr[i * posItemSize + 2] : 0.f;
-
-                if (normalData) {
-                    interleaved[base + 3] = normalData[i * normalItemSize + 0];
-                    interleaved[base + 4] = normalData[i * normalItemSize + 1];
-                    interleaved[base + 5] = (normalItemSize > 2) ? normalData[i * normalItemSize + 2] : 0.f;
-                } else {
-                    interleaved[base + 3] = 0.f;
-                    interleaved[base + 4] = 0.f;
-                    interleaved[base + 5] = 1.f;
-                }
-
-                if (uvData) {
-                    interleaved[base + 6] = uvData[i * uvItemSize + 0];
-                    interleaved[base + 7] = (uvItemSize > 1) ? uvData[i * uvItemSize + 1] : 0.f;
-                } else {
-                    interleaved[base + 6] = 0.f;
-                    interleaved[base + 7] = 0.f;
-                }
-            }
-
-            auto byteSize = interleaved.size() * sizeof(float);
-            WGPUBufferDescriptor vbDesc{};
-            vbDesc.label = {.data = "vertex_buf", .length = 10};
-            vbDesc.size = byteSize;
-            vbDesc.usage = WGPUBufferUsage_Vertex | WGPUBufferUsage_CopyDst;
-            gb.vertexBuffer = wgpuDeviceCreateBuffer(device, &vbDesc);
-            wgpuQueueWriteBuffer(queue, gb.vertexBuffer, 0, interleaved.data(), byteSize);
-        }
-
-        // Index buffer
-        if (geometry->getIndex()) {
-            auto indexAttr = geometry->getIndex();
-            auto& arr = indexAttr->array();
-            std::vector<uint32_t> indices(arr.size());
-            for (size_t i = 0; i < arr.size(); ++i) {
-                indices[i] = static_cast<uint32_t>(arr[i]);
-            }
-            auto byteSize = indices.size() * sizeof(uint32_t);
-            WGPUBufferDescriptor ibDesc{};
-            ibDesc.label = {.data = "index_buf", .length = 9};
-            ibDesc.size = byteSize;
-            ibDesc.usage = WGPUBufferUsage_Index | WGPUBufferUsage_CopyDst;
-            gb.indexBuffer = wgpuDeviceCreateBuffer(device, &ibDesc);
-            wgpuQueueWriteBuffer(queue, gb.indexBuffer, 0, indices.data(), byteSize);
-            gb.indexCount = static_cast<uint32_t>(indices.size());
-        }
-
-        geometryCache[id] = gb;
-        return geometryCache[id];
-    }
-
-    // Wireframe index buffer: convert triangle indices to line-pair indices
-    WireframeBuffers& getOrCreateWireframeBuffers(BufferGeometry* geometry) {
-        auto id = geometry->id;
-        auto it = wireframeCache.find(id);
-        if (it != wireframeCache.end()) return it->second;
-
-        WireframeBuffers wb{};
-        std::vector<uint32_t> lineIndices;
-
-        if (auto indexAttr = geometry->getIndex()) {
-            auto& arr = indexAttr->array();
-            // Each triangle (a,b,c) => edges (a,b), (b,c), (c,a)
-            for (size_t i = 0; i + 2 < arr.size(); i += 3) {
-                uint32_t a = static_cast<uint32_t>(arr[i]);
-                uint32_t b = static_cast<uint32_t>(arr[i + 1]);
-                uint32_t c = static_cast<uint32_t>(arr[i + 2]);
-                lineIndices.push_back(a); lineIndices.push_back(b);
-                lineIndices.push_back(b); lineIndices.push_back(c);
-                lineIndices.push_back(c); lineIndices.push_back(a);
-            }
-        } else if (geometry->hasAttribute("position")) {
-            uint32_t count = static_cast<uint32_t>(geometry->getAttribute<float>("position")->count());
-            for (uint32_t i = 0; i + 2 < count; i += 3) {
-                lineIndices.push_back(i);   lineIndices.push_back(i+1);
-                lineIndices.push_back(i+1); lineIndices.push_back(i+2);
-                lineIndices.push_back(i+2); lineIndices.push_back(i);
-            }
-        }
-
-        if (!lineIndices.empty()) {
-            auto byteSize = lineIndices.size() * sizeof(uint32_t);
-            WGPUBufferDescriptor ibDesc{};
-            ibDesc.label = {.data = "wireframe_ib", .length = 12};
-            ibDesc.size = byteSize;
-            ibDesc.usage = WGPUBufferUsage_Index | WGPUBufferUsage_CopyDst;
-            wb.indexBuffer = wgpuDeviceCreateBuffer(device, &ibDesc);
-            wgpuQueueWriteBuffer(queue, wb.indexBuffer, 0, lineIndices.data(), byteSize);
-            wb.indexCount = static_cast<uint32_t>(lineIndices.size());
-        }
-
-        wireframeCache[id] = wb;
-        return wireframeCache[id];
-    }
-
     // Shadow map helpers
     void initShadowMap() {
         if (shadowState.depthTexture) return; // already initialized
@@ -1342,7 +1101,7 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
         attrs[2].format = WGPUVertexFormat_Float32x2; attrs[2].offset = 24; attrs[2].shaderLocation = 2;
 
         WGPUVertexBufferLayout vbLayout{};
-        vbLayout.arrayStride = VERTEX_STRIDE;
+        vbLayout.arrayStride = dawn::VERTEX_STRIDE;
         vbLayout.stepMode = WGPUVertexStepMode_Vertex;
         vbLayout.attributeCount = 3;
         vbLayout.attributes = attrs;
@@ -1424,10 +1183,10 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
 
                 wgpuRenderPassEncoderSetBindGroup(pass, 0, bg, 0, nullptr);
 
-                auto& gb = getOrCreateGeometryBuffers(geometry.get());
+                auto& gb = geometries->getOrCreateGeometryBuffers(geometry.get());
                 if (gb.vertexBuffer) {
                     wgpuRenderPassEncoderSetVertexBuffer(pass, 0, gb.vertexBuffer, 0,
-                                                         gb.vertexCount * VERTEX_STRIDE);
+                                                         gb.vertexCount * dawn::VERTEX_STRIDE);
                     if (gb.indexBuffer) {
                         wgpuRenderPassEncoderSetIndexBuffer(pass, gb.indexBuffer,
                                                              WGPUIndexFormat_Uint32, 0,
@@ -1616,8 +1375,8 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
         renderInfo.triangles = 0;
         renderInfo.lines = 0;
         renderInfo.points = 0;
-        renderInfo.geometries = geometryCache.size();
-        renderInfo.textures = textureCache.size();
+        renderInfo.geometries = geometries->count();
+        renderInfo.textures = textures->count();
 
         // Update window size if changed
         auto currentSize = canvas.size();
@@ -2102,9 +1861,9 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
             WGPUBindGroupEntry e{}; e.binding = 2; e.buffer = lightBuffer; e.offset = 0; e.size = LIGHT_UNIFORM_SIZE; entries.push_back(e);
         }
 
-        TextureEntry* texEntry = &dummyTexture;
+        auto* texEntry = &textures->getDummyTexture();
         if (tex && diffuseMap) {
-            texEntry = &getOrCreateTexture(diffuseMap);
+            texEntry = &textures->getOrCreateTexture(diffuseMap);
         }
         if (tex) {
             { WGPUBindGroupEntry e{}; e.binding = 3; e.textureView = texEntry->view; entries.push_back(e); }
@@ -2112,9 +1871,9 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
         }
 
         if (features & FEAT_NORMAL_MAP) {
-            TextureEntry* nmEntry = &dummyTexture;
+            auto* nmEntry = &textures->getDummyTexture();
             if (normalMap) {
-                nmEntry = &getOrCreateTexture(normalMap);
+                nmEntry = &textures->getOrCreateTexture(normalMap);
             }
             { WGPUBindGroupEntry e{}; e.binding = 5; e.textureView = nmEntry->view; entries.push_back(e); }
             { WGPUBindGroupEntry e{}; e.binding = 6; e.sampler = nmEntry->sampler; entries.push_back(e); }
@@ -2136,10 +1895,10 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
         wgpuRenderPassEncoderSetPipeline(pass, pe.pipeline);
         wgpuRenderPassEncoderSetBindGroup(pass, 0, bg, 0, nullptr);
 
-        auto& gb = getOrCreateGeometryBuffers(geometry);
+        auto& gb = geometries->getOrCreateGeometryBuffers(geometry);
         if (gb.vertexBuffer) {
             wgpuRenderPassEncoderSetVertexBuffer(pass, 0, gb.vertexBuffer, 0,
-                                                     gb.vertexCount * VERTEX_STRIDE);
+                                                     gb.vertexCount * dawn::VERTEX_STRIDE);
 
             uint32_t instanceCount = 1;
             // InstancedMesh: per-instance transform buffers not yet implemented,
@@ -2147,7 +1906,7 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
             (void)instancedMesh;
 
             if (useWireframe) {
-                auto& wb = getOrCreateWireframeBuffers(geometry);
+                auto& wb = geometries->getOrCreateWireframeBuffers(geometry);
                 if (wb.indexBuffer) {
                     wgpuRenderPassEncoderSetIndexBuffer(pass, wb.indexBuffer,
                                                          WGPUIndexFormat_Uint32, 0,
@@ -2214,31 +1973,9 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
     void dispose() {
         if (!initialized) return;
 
-        // Release geometry cache
-        for (auto& [id, gb] : geometryCache) {
-            if (gb.vertexBuffer) wgpuBufferRelease(gb.vertexBuffer);
-            if (gb.indexBuffer) wgpuBufferRelease(gb.indexBuffer);
-        }
-        geometryCache.clear();
-
-        // Release wireframe cache
-        for (auto& [id, wb] : wireframeCache) {
-            if (wb.indexBuffer) wgpuBufferRelease(wb.indexBuffer);
-        }
-        wireframeCache.clear();
-
-        // Release texture cache
-        for (auto& [id, te] : textureCache) {
-            if (te.view) wgpuTextureViewRelease(te.view);
-            if (te.texture) wgpuTextureRelease(te.texture);
-            if (te.sampler) wgpuSamplerRelease(te.sampler);
-        }
-        textureCache.clear();
-
-        // Release dummy texture
-        if (dummyTexture.view) wgpuTextureViewRelease(dummyTexture.view);
-        if (dummyTexture.texture) wgpuTextureRelease(dummyTexture.texture);
-        if (dummyTexture.sampler) wgpuSamplerRelease(dummyTexture.sampler);
+        // Release geometry and texture subsystems
+        if (geometries) geometries->dispose();
+        if (textures) textures->dispose();
 
         // Release render target cache
         for (auto& [id, rt] : rtCache) {

@@ -23,10 +23,7 @@ namespace threepp {
     class Camera;
     class Scene;
     class Object3D;
-    class GLRenderTarget;
-
-    // Alias for future use — GLRenderTarget is already backend-neutral in its header.
-    using RenderTarget = GLRenderTarget;
+    class RenderTarget;
 
     class Renderer {
 
