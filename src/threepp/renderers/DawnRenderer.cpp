@@ -141,6 +141,9 @@ namespace {
     // Instancing bit
     constexpr uint32_t FEAT_INSTANCED   = 1 << 20;
 
+    // Vertex colors bit
+    constexpr uint32_t FEAT_VERTEX_COLORS = 1 << 21;
+
     constexpr uint32_t SHADOW_MAP_SIZE = 1024;
     constexpr size_t SHADOW_UNIFORM_SIZE = 80; // lightVP(64) + bias(4) + normalBias(4) + padding(8)
 
@@ -229,24 +232,27 @@ struct ShadowUniforms {
 )";
         }
 
-        s << R"(
-struct VertexInput {
-    @location(0) position: vec3<f32>,
-    @location(1) normal: vec3<f32>,
-    @location(2) uv: vec2<f32>,
-};
-struct VertexOutput {
-    @builtin(position) clipPos: vec4<f32>,
-    @location(0) worldPos: vec3<f32>,
-    @location(1) worldNormal: vec3<f32>,
-    @location(2) uv: vec2<f32>,)";
+        s << "\nstruct VertexInput {\n";
+        s << "    @location(0) position: vec3<f32>,\n";
+        s << "    @location(1) normal: vec3<f32>,\n";
+        s << "    @location(2) uv: vec2<f32>,\n";
+        s << "    @location(3) color: vec3<f32>,\n";
+        s << "};\n";
 
+        s << "struct VertexOutput {\n";
+        s << "    @builtin(position) clipPos: vec4<f32>,\n";
+        s << "    @location(0) worldPos: vec3<f32>,\n";
+        s << "    @location(1) worldNormal: vec3<f32>,\n";
+        s << "    @location(2) uv: vec2<f32>,\n";
         if (features & FEAT_SHADOW) {
-            s << "\n    @location(3) lightSpacePos: vec4<f32>,\n";
+            s << "    @location(3) lightSpacePos: vec4<f32>,\n";
         }
+        if (features & FEAT_VERTEX_COLORS) {
+            s << "    @location(4) vertexColor: vec3<f32>,\n";
+        }
+        s << "};\n";
 
-        s << R"(};
-
+        s << R"(
 @vertex
 fn vs_main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
@@ -260,6 +266,9 @@ fn vs_main(in: VertexInput) -> VertexOutput {
         if (features & FEAT_SHADOW) {
             s << "\n    out.lightSpacePos = shadow.lightVP * worldPos4;\n";
         }
+        if (features & FEAT_VERTEX_COLORS) {
+            s << "\n    out.vertexColor = in.color;\n";
+        }
 
         s << R"(
     return out;
@@ -270,6 +279,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     var baseColor = material.diffuse.rgb;
     let opacity = material.roughnessMetalnessOpacity.z;
 )";
+        if (features & FEAT_VERTEX_COLORS) {
+            s << "    baseColor = baseColor * in.vertexColor;\n";
+        }
 
         if (features & FEAT_TEXTURE) {
             s << "    let texColor = textureSample(t_diffuse, s_diffuse, in.uv);\n";
@@ -882,16 +894,17 @@ struct DawnRenderer::Impl {
         plDesc.bindGroupLayouts = &entry.bindGroupLayout;
         entry.layout = wgpuDeviceCreatePipelineLayout(device, &plDesc);
 
-        // Vertex buffer layout: pos(vec3) + normal(vec3) + uv(vec2) = 32 bytes
-        WGPUVertexAttribute attrs[3]{};
+        // Vertex buffer layout: pos(vec3) + normal(vec3) + uv(vec2) + color(vec3) = 44 bytes
+        WGPUVertexAttribute attrs[4]{};
         attrs[0].format = WGPUVertexFormat_Float32x3; attrs[0].offset = 0; attrs[0].shaderLocation = 0;
         attrs[1].format = WGPUVertexFormat_Float32x3; attrs[1].offset = 12; attrs[1].shaderLocation = 1;
         attrs[2].format = WGPUVertexFormat_Float32x2; attrs[2].offset = 24; attrs[2].shaderLocation = 2;
+        attrs[3].format = WGPUVertexFormat_Float32x3; attrs[3].offset = 32; attrs[3].shaderLocation = 3;
 
         WGPUVertexBufferLayout vbLayout{};
         vbLayout.arrayStride = dawn::VERTEX_STRIDE;
         vbLayout.stepMode = WGPUVertexStepMode_Vertex;
-        vbLayout.attributeCount = 3;
+        vbLayout.attributeCount = 4;
         vbLayout.attributes = attrs;
 
         // Blend state — driven by the blend bits in the pipeline key
@@ -1060,7 +1073,7 @@ struct DawnRenderer::Impl {
         std::string depthWGSL = R"(
 struct DepthUniforms { mvp: mat4x4<f32> };
 @group(0) @binding(0) var<uniform> u: DepthUniforms;
-struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3<f32>, @location(2) uv: vec2<f32> };
+struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3<f32>, @location(2) uv: vec2<f32>, @location(3) color: vec3<f32> };
 @vertex fn vs_main(in: VertexInput) -> @builtin(position) vec4<f32> {
     return u.mvp * vec4<f32>(in.position, 1.0);
 }
@@ -1096,15 +1109,16 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
         shadowState.depthPipelineLayout = wgpuDeviceCreatePipelineLayout(device, &plDesc);
 
         // Vertex layout (same as main pipeline)
-        WGPUVertexAttribute attrs[3]{};
+        WGPUVertexAttribute attrs[4]{};
         attrs[0].format = WGPUVertexFormat_Float32x3; attrs[0].offset = 0; attrs[0].shaderLocation = 0;
         attrs[1].format = WGPUVertexFormat_Float32x3; attrs[1].offset = 12; attrs[1].shaderLocation = 1;
         attrs[2].format = WGPUVertexFormat_Float32x2; attrs[2].offset = 24; attrs[2].shaderLocation = 2;
+        attrs[3].format = WGPUVertexFormat_Float32x3; attrs[3].offset = 32; attrs[3].shaderLocation = 3;
 
         WGPUVertexBufferLayout vbLayout{};
         vbLayout.arrayStride = dawn::VERTEX_STRIDE;
         vbLayout.stepMode = WGPUVertexStepMode_Vertex;
-        vbLayout.attributeCount = 3;
+        vbLayout.attributeCount = 4;
         vbLayout.attributes = attrs;
 
         WGPUDepthStencilState depthStencil{};
@@ -1814,6 +1828,11 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
         else                            features |= BLEND_NORMAL;
         if (rawMat->transparent) {
             features |= DEPTH_WRITE_OFF;
+        }
+
+        // Vertex colors
+        if (rawMat->vertexColors && geometry->hasAttribute("color")) {
+            features |= FEAT_VERTEX_COLORS;
         }
 
         // Shadow (mesh objects only)
