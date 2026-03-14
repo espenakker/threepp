@@ -312,11 +312,16 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 s << "          specularLight += lights.directional[i].color * material.specularAndShininess.rgb * s; }\n";
             }
             if (features & FEAT_PBR) {
+                // GGX/Trowbridge-Reitz NDF with Schlick Fresnel
                 s << "        { let H = normalize(L + V); let NdotH = max(dot(N, H), 0.0);\n";
+                s << "          let NdotV = max(dot(N, V), 0.001);\n";
                 s << "          let r = material.roughnessMetalnessOpacity.x; let m = material.roughnessMetalnessOpacity.y;\n";
-                s << "          let a2 = r*r*r*r; let sp = pow(NdotH, max(2.0/max(a2,0.001) - 2.0, 1.0));\n";
+                s << "          let a = r * r; let a2 = a * a;\n";
+                s << "          let denom = NdotH * NdotH * (a2 - 1.0) + 1.0;\n";
+                s << "          let D = a2 / (3.14159265 * denom * denom);\n";
                 s << "          let F0 = mix(vec3<f32>(0.04), baseColor, m);\n";
-                s << "          specularLight += lights.directional[i].color * F0 * sp; }\n";
+                s << "          let F = F0 + (1.0 - F0) * pow(1.0 - max(dot(H, V), 0.0), 5.0);\n";
+                s << "          specularLight += lights.directional[i].color * F * D * NdotL; }\n";
             }
             s << "    }\n";
 
@@ -336,6 +341,16 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 s << "        { let H = normalize(L + V); let s = pow(max(dot(N, H), 0.0), material.specularAndShininess.w);\n";
                 s << "          specularLight += lights.point[i].color * material.specularAndShininess.rgb * s * att; }\n";
             }
+            if (features & FEAT_PBR) {
+                s << "        { let H = normalize(L + V); let NdotH = max(dot(N, H), 0.0);\n";
+                s << "          let r = material.roughnessMetalnessOpacity.x; let m = material.roughnessMetalnessOpacity.y;\n";
+                s << "          let a = r * r; let a2 = a * a;\n";
+                s << "          let denom = NdotH * NdotH * (a2 - 1.0) + 1.0;\n";
+                s << "          let D = a2 / (3.14159265 * denom * denom);\n";
+                s << "          let F0 = mix(vec3<f32>(0.04), baseColor, m);\n";
+                s << "          let F = F0 + (1.0 - F0) * pow(1.0 - max(dot(H, V), 0.0), 5.0);\n";
+                s << "          specularLight += lights.point[i].color * F * D * NdotL * att; }\n";
+            }
             s << "    }\n";
 
             s << R"(
@@ -351,6 +366,22 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             att = att * r2 * r2 / (d * d + 0.0001);
         }
         diffuseLight += lights.spot[i].color * NdotL * att;
+)";
+            if (features & FEAT_SPECULAR) {
+                s << "        { let H = normalize(L + V); let s = pow(max(dot(N, H), 0.0), material.specularAndShininess.w);\n";
+                s << "          specularLight += lights.spot[i].color * material.specularAndShininess.rgb * s * att; }\n";
+            }
+            if (features & FEAT_PBR) {
+                s << "        { let H = normalize(L + V); let NdotH = max(dot(N, H), 0.0);\n";
+                s << "          let r = material.roughnessMetalnessOpacity.x; let m = material.roughnessMetalnessOpacity.y;\n";
+                s << "          let a = r * r; let a2 = a * a;\n";
+                s << "          let denom = NdotH * NdotH * (a2 - 1.0) + 1.0;\n";
+                s << "          let D = a2 / (3.14159265 * denom * denom);\n";
+                s << "          let F0 = mix(vec3<f32>(0.04), baseColor, m);\n";
+                s << "          let F = F0 + (1.0 - F0) * pow(1.0 - max(dot(H, V), 0.0), 5.0);\n";
+                s << "          specularLight += lights.spot[i].color * F * D * NdotL * att; }\n";
+            }
+            s << R"(
     }
     for (var i = 0u; i < lights.numHemi; i++) {
         let w = 0.5 * dot(N, lights.hemi[i].direction) + 0.5;
@@ -767,6 +798,11 @@ struct DawnRenderer::Impl {
         WGPUStringView shaderLabel = {.data = "dawn_shader", .length = 11};
         shaderDesc.label = shaderLabel;
         entry.shader = wgpuDeviceCreateShaderModule(device, &shaderDesc);
+        if (!entry.shader) {
+            std::cerr << "DawnRenderer: Failed to create shader module for features 0x"
+                      << std::hex << features << std::dec << std::endl;
+            return pipelineCache[features]; // return default-initialized entry
+        }
 
         // Bind group layout entries
         std::vector<WGPUBindGroupLayoutEntry> bglEntries;
@@ -965,6 +1001,10 @@ struct DawnRenderer::Impl {
         pipelineDesc.fragment = &fragmentState;
 
         entry.pipeline = wgpuDeviceCreateRenderPipeline(device, &pipelineDesc);
+        if (!entry.pipeline) {
+            std::cerr << "DawnRenderer: Failed to create render pipeline for features 0x"
+                      << std::hex << features << std::dec << std::endl;
+        }
 
         pipelineCache[features] = entry;
         return pipelineCache[features];
@@ -1497,7 +1537,7 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
                     Vector3 lightPos, targetPos;
                     lightPos.setFromMatrixPosition(*dl->matrixWorld);
                     targetPos.setFromMatrixPosition(*dl->target().matrixWorld);
-                    Vector3 direction = lightPos.clone().sub(targetPos); // world-space direction (from target to light)
+                    Vector3 direction = lightPos.clone().sub(targetPos).normalize();
                     dirs.push_back({direction, Color(dl->color).multiplyScalar(dl->intensity)});
                 }
             } else if (auto pl = obj.as<PointLight>()) {
@@ -1511,7 +1551,7 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
                     Vector3 pos, targetPos;
                     pos.setFromMatrixPosition(*sl->matrixWorld);
                     targetPos.setFromMatrixPosition(*sl->target().matrixWorld);
-                    Vector3 direction = pos.clone().sub(targetPos); // from target to light
+                    Vector3 direction = pos.clone().sub(targetPos).normalize();
                     sps.push_back({pos, direction, Color(sl->color).multiplyScalar(sl->intensity),
                                    sl->distance, sl->decay,
                                    std::cos(sl->angle), std::cos(sl->angle * (1.0f - sl->penumbra))});
@@ -1672,6 +1712,8 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
             wgpuSurfaceGetCurrentTexture(surface, &surfaceTexture);
             if (surfaceTexture.status != WGPUSurfaceGetCurrentTextureStatus_SuccessOptimal &&
                 surfaceTexture.status != WGPUSurfaceGetCurrentTextureStatus_SuccessSuboptimal) {
+                std::cerr << "DawnRenderer: Failed to acquire surface texture (status "
+                          << static_cast<int>(surfaceTexture.status) << ")" << std::endl;
                 return;
             }
             WGPUTextureViewDescriptor vd{};
@@ -1895,6 +1937,7 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
         bool isMesh = object->is<Mesh>();
         bool isLine = object->is<Line>();
         bool isPoints = object->is<Points>();
+        bool isLineSegments = object->is<LineSegments>();
         auto* instancedMesh = object->as<InstancedMesh>();
 
         // Geometry comes from the render item (set during collection)
@@ -1946,12 +1989,12 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
         }
 
         // Set topology based on object type
+        bool isLineLoop = object->is<LineLoop>();
         if (isLine) {
-            if (object->is<LineSegments>()) {
+            if (object->is<LineSegments>() || isLineLoop) {
+                // LineLoop uses LineList with a generated index buffer that closes the loop
                 features |= TOPO_LINE_LIST;
             } else {
-                // Line and LineLoop both use LineStrip
-                // (LineLoop is approximated as LineStrip — WebGPU has no line loop)
                 features |= TOPO_LINE_STRIP;
             }
         } else if (isPoints) {
@@ -2000,6 +2043,7 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
 
         // Get/create pipeline for this feature set
         auto& pe = getOrCreatePipeline(features);
+        if (!pe.pipeline) return;
 
         // Upload transform uniforms
         float transformData[TRANSFORM_UNIFORM_SIZE / sizeof(float)];
@@ -2098,9 +2142,9 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
                                                      gb.vertexCount * VERTEX_STRIDE);
 
             uint32_t instanceCount = 1;
-            if (instancedMesh) {
-                instanceCount = static_cast<uint32_t>(instancedMesh->count());
-            }
+            // InstancedMesh: per-instance transform buffers not yet implemented,
+            // render single instance to avoid stacked duplicates at same position
+            (void)instancedMesh;
 
             if (useWireframe) {
                 auto& wb = getOrCreateWireframeBuffers(geometry);
@@ -2112,6 +2156,29 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
                     renderInfo.calls++;
                     renderInfo.lines += wb.indexCount / 2;
                 }
+            } else if (isLineLoop) {
+                // WebGPU has no line loop primitive — generate line-list indices
+                // that include the closing edge (last vertex → first vertex)
+                uint32_t n = gb.vertexCount;
+                std::vector<uint32_t> loopIndices;
+                loopIndices.reserve(n * 2);
+                for (uint32_t i = 0; i < n; i++) {
+                    loopIndices.push_back(i);
+                    loopIndices.push_back((i + 1) % n);
+                }
+                WGPUBufferDescriptor bd{};
+                bd.label = {.data = "lineloop_idx", .length = 12};
+                bd.size = loopIndices.size() * sizeof(uint32_t);
+                bd.usage = WGPUBufferUsage_Index | WGPUBufferUsage_CopyDst;
+                WGPUBuffer loopBuf = wgpuDeviceCreateBuffer(device, &bd);
+                wgpuQueueWriteBuffer(queue, loopBuf, 0, loopIndices.data(), bd.size);
+                wgpuRenderPassEncoderSetIndexBuffer(pass, loopBuf,
+                                                     WGPUIndexFormat_Uint32, 0, bd.size);
+                uint32_t drawCount = static_cast<uint32_t>(loopIndices.size());
+                wgpuRenderPassEncoderDrawIndexed(pass, drawCount, instanceCount, 0, 0, 0);
+                wgpuBufferRelease(loopBuf);
+                renderInfo.calls++;
+                renderInfo.lines += n;
             } else if (gb.indexBuffer) {
                 // Determine draw range from geometry group if present
                 uint32_t drawStart = 0;
@@ -2125,7 +2192,7 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
                                                          gb.indexCount * sizeof(uint32_t));
                 wgpuRenderPassEncoderDrawIndexed(pass, drawCount, instanceCount, drawStart, 0, 0);
                 renderInfo.calls++;
-                if (isLine) renderInfo.lines += drawCount / 2;
+                if (isLine) renderInfo.lines += isLineSegments ? drawCount / 2 : (drawCount > 0 ? drawCount - 1 : 0);
                 else if (isPoints) renderInfo.points += drawCount;
                 else renderInfo.triangles += drawCount / 3;
             } else {
@@ -2135,7 +2202,7 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
                 }
                 wgpuRenderPassEncoderDraw(pass, drawCount, instanceCount, 0, 0);
                 renderInfo.calls++;
-                if (isLine) renderInfo.lines += drawCount / 2;
+                if (isLine) renderInfo.lines += isLineSegments ? drawCount / 2 : (drawCount > 0 ? drawCount - 1 : 0);
                 else if (isPoints) renderInfo.points += drawCount;
                 else renderInfo.triangles += drawCount / 3;
             }
