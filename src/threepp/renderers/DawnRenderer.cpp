@@ -20,6 +20,10 @@
 #include "threepp/textures/Texture.hpp"
 
 #include "threepp/renderers/common/Lights.hpp"
+#include "threepp/renderers/common/RenderLists.hpp"
+
+#include "threepp/scenes/Fog.hpp"
+#include "threepp/scenes/FogExp2.hpp"
 
 #define GLFW_INCLUDE_NONE
 #ifdef __linux__
@@ -91,6 +95,17 @@ namespace {
 
     constexpr uint32_t DEPTH_WRITE_OFF  = 1 << 11;
     constexpr uint32_t FEAT_SHADOW      = 1 << 12;
+    constexpr uint32_t FEAT_FOG_LINEAR  = 1 << 13;
+    constexpr uint32_t FEAT_FOG_EXP2    = 1 << 14;
+
+    // Tone mapping mode encoded in bits 15-16
+    constexpr uint32_t TONEMAP_SHIFT    = 15;
+    constexpr uint32_t TONEMAP_MASK     = 0x7 << TONEMAP_SHIFT;
+    constexpr uint32_t TONEMAP_NONE     = 0 << TONEMAP_SHIFT;
+    constexpr uint32_t TONEMAP_LINEAR   = 1 << TONEMAP_SHIFT;
+    constexpr uint32_t TONEMAP_REINHARD = 2 << TONEMAP_SHIFT;
+    constexpr uint32_t TONEMAP_CINEON   = 3 << TONEMAP_SHIFT;
+    constexpr uint32_t TONEMAP_ACES     = 4 << TONEMAP_SHIFT;
 
     constexpr uint32_t SHADOW_MAP_SIZE = 1024;
     constexpr size_t SHADOW_UNIFORM_SIZE = 80; // lightVP(64) + bias(4) + normalBias(4) + padding(8)
@@ -103,8 +118,8 @@ namespace {
     // Transform: model(64) + view(64) + proj(64) + normalMatrix(48 = 3*vec4 padded) + cameraPos(12) + pad(4) = 256
     constexpr size_t TRANSFORM_UNIFORM_SIZE = 256;
 
-    // Material: diffuse(16) + specularAndShininess(16) + roughnessMetalnessOpacity(16) + emissive(16) + flags(16) = 80, pad to 96
-    constexpr size_t MATERIAL_UNIFORM_SIZE = 96;
+    // Material: diffuse(16) + specularAndShininess(16) + roughnessMetalnessOpacity(16) + emissive(16) + flags(16) + fog(16) + toneMapping(16) = 112, pad to 128
+    constexpr size_t MATERIAL_UNIFORM_SIZE = 128;
 
     // Light: header(32) + dir(4*32=128) + point(4*48=192) + spot(4*64=256) + hemi(2*48=96) = 704
     constexpr size_t LIGHT_UNIFORM_SIZE = 704;
@@ -134,6 +149,8 @@ struct MaterialUniforms {
     roughnessMetalnessOpacity: vec4<f32>,
     emissive: vec4<f32>,
     flags: vec4<f32>,
+    fogColor: vec4<f32>,
+    fogParams: vec4<f32>,
     _pad: vec4<f32>,
 };
 @group(0) @binding(1) var<uniform> material: MaterialUniforms;
@@ -344,6 +361,40 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             }
         }
 
+        // Tone mapping (applied before fog)
+        if ((features & TONEMAP_MASK) != TONEMAP_NONE) {
+            s << "    let exposure = material.fogParams.w;\n";
+            s << "    baseColor = baseColor * exposure;\n";
+            if ((features & TONEMAP_MASK) == TONEMAP_REINHARD) {
+                s << "    baseColor = baseColor / (vec3<f32>(1.0) + baseColor);\n";
+            } else if ((features & TONEMAP_MASK) == TONEMAP_CINEON) {
+                // Optimized filmic operator (Uncharted2-like)
+                s << "    let x = max(vec3<f32>(0.0), baseColor - vec3<f32>(0.004));\n";
+                s << "    baseColor = (x * (6.2 * x + vec3<f32>(0.5))) / (x * (6.2 * x + vec3<f32>(1.7)) + vec3<f32>(0.06));\n";
+            } else if ((features & TONEMAP_MASK) == TONEMAP_ACES) {
+                s << "    let a = baseColor * (baseColor * 2.51 + vec3<f32>(0.03));\n";
+                s << "    let b = baseColor * (baseColor * 2.43 + vec3<f32>(0.59)) + vec3<f32>(0.14);\n";
+                s << "    baseColor = clamp(a / b, vec3<f32>(0.0), vec3<f32>(1.0));\n";
+            }
+            // TONEMAP_LINEAR: just exposure multiplication (done above)
+        }
+
+        // Fog (applied after tone mapping, mixes with fog color based on distance)
+        if (features & FEAT_FOG_LINEAR) {
+            s << "    {\n";
+            s << "        let fogDist = length(transform.cameraPos - in.worldPos);\n";
+            s << "        let fogFactor = clamp((material.fogParams.y - fogDist) / (material.fogParams.y - material.fogParams.x), 0.0, 1.0);\n";
+            s << "        baseColor = mix(material.fogColor.rgb, baseColor, fogFactor);\n";
+            s << "    }\n";
+        } else if (features & FEAT_FOG_EXP2) {
+            s << "    {\n";
+            s << "        let fogDist = length(transform.cameraPos - in.worldPos);\n";
+            s << "        let fogDensity = material.fogParams.z;\n";
+            s << "        let fogFactor = exp(-fogDensity * fogDensity * fogDist * fogDist);\n";
+            s << "        baseColor = mix(material.fogColor.rgb, baseColor, clamp(fogFactor, 0.0, 1.0));\n";
+            s << "    }\n";
+        }
+
         s << "    return vec4<f32>(baseColor, opacity);\n}\n";
         return s.str();
     }
@@ -353,6 +404,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
 struct DawnRenderer::Impl {
 
+    DawnRenderer& scope;
     Canvas& canvas;
 
     // Core WebGPU objects
@@ -448,6 +500,9 @@ struct DawnRenderer::Impl {
         float normalBias = 0.0f;
     } shadowState;
 
+    // Render list for opaque/transparent sorting
+    RenderList renderList_;
+
     // Render info/statistics
     struct {
         size_t frame = 0;
@@ -461,8 +516,8 @@ struct DawnRenderer::Impl {
 
     bool initialized = false;
 
-    explicit Impl(Canvas& canvas)
-        : canvas(canvas), size_(canvas.size()) {
+    explicit Impl(DawnRenderer& scope, Canvas& canvas)
+        : scope(scope), canvas(canvas), size_(canvas.size()) {
 
         viewport_.w = static_cast<float>(size_.width());
         viewport_.h = static_cast<float>(size_.height());
@@ -1605,6 +1660,15 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
         encDesc.label = {.data = "cmd_enc", .length = 7};
         WGPUCommandEncoder encoder = wgpuDeviceCreateCommandEncoder(device, &encDesc);
 
+        // Determine clear color (scene background overrides if set)
+        auto* sceneObj = scene.as<Scene>();
+        Color effectiveClearColor = clearColor_;
+        float effectiveClearAlpha = clearAlpha_;
+        if (sceneObj && sceneObj->background.isColor()) {
+            effectiveClearColor = sceneObj->background.color();
+            effectiveClearAlpha = 1.0f;
+        }
+
         // Render pass
         WGPURenderPassColorAttachment colorAttachment{};
         colorAttachment.view = colorView;
@@ -1613,10 +1677,10 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
         colorAttachment.loadOp = WGPULoadOp_Clear;
         colorAttachment.storeOp = WGPUStoreOp_Store;
         colorAttachment.clearValue = {
-                static_cast<double>(clearColor_.r),
-                static_cast<double>(clearColor_.g),
-                static_cast<double>(clearColor_.b),
-                static_cast<double>(clearAlpha_)};
+                static_cast<double>(effectiveClearColor.r),
+                static_cast<double>(effectiveClearColor.g),
+                static_cast<double>(effectiveClearColor.b),
+                static_cast<double>(effectiveClearAlpha)};
 
         WGPURenderPassDepthStencilAttachment depthAttachment{};
         depthAttachment.view = depthView;
@@ -1638,8 +1702,55 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
             wgpuRenderPassEncoderSetScissorRect(pass, scissor_.x, scissor_.y, scissor_.w, scissor_.h);
         }
 
-        // Traverse scene and render meshes
-        renderObject(pass, scene, projectionMatrix, viewMatrix, camera);
+        // Collect and sort renderables
+        renderList_.init();
+        Matrix4 projScreenMatrix;
+        projScreenMatrix.multiplyMatrices(projectionMatrix, viewMatrix);
+        collectRenderables(scene, projScreenMatrix);
+        if (scope.sortObjects) {
+            renderList_.sort();
+        }
+        renderList_.finish();
+
+        // Extract fog and tone mapping state from scene
+        Color fogColor;
+        float fogNear = 0, fogFar = 0, fogDensity = 0;
+        uint32_t fogBits = 0;
+        if (sceneObj && sceneObj->fog) {
+            if (auto* f = std::get_if<Fog>(&*sceneObj->fog)) {
+                fogColor = f->color;
+                fogNear = f->nearPlane;
+                fogFar = f->farPlane;
+                fogBits = FEAT_FOG_LINEAR;
+            } else if (auto* f2 = std::get_if<FogExp2>(&*sceneObj->fog)) {
+                fogColor = f2->color;
+                fogDensity = f2->density;
+                fogBits = FEAT_FOG_EXP2;
+            }
+        }
+
+        uint32_t tonemapBits = TONEMAP_NONE;
+        switch (scope.toneMapping) {
+            case ToneMapping::Linear: tonemapBits = TONEMAP_LINEAR; break;
+            case ToneMapping::Reinhard: tonemapBits = TONEMAP_REINHARD; break;
+            case ToneMapping::Cineon: tonemapBits = TONEMAP_CINEON; break;
+            case ToneMapping::ACESFilmic: tonemapBits = TONEMAP_ACES; break;
+            default: break;
+        }
+
+        // Render opaque objects (front-to-back, depth write on)
+        for (auto* item : renderList_.opaque) {
+            renderItem(pass, item, projectionMatrix, viewMatrix, camera,
+                       fogBits, fogColor, fogNear, fogFar, fogDensity,
+                       tonemapBits);
+        }
+
+        // Render transparent objects (back-to-front, depth write off)
+        for (auto* item : renderList_.transparent) {
+            renderItem(pass, item, projectionMatrix, viewMatrix, camera,
+                       fogBits, fogColor, fogNear, fogFar, fogDensity,
+                       tonemapBits);
+        }
 
         wgpuRenderPassEncoderEnd(pass);
         wgpuRenderPassEncoderRelease(pass);
@@ -1665,225 +1776,247 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
         }
     }
 
-    void renderObject(WGPURenderPassEncoder pass, Object3D& object,
-                       const Matrix4& projectionMatrix, const Matrix4& viewMatrix,
-                       const Camera& camera) {
+    // Collect all renderable objects into the render list with z-depth for sorting.
+    void collectRenderables(Object3D& object, const Matrix4& projScreenMatrix) {
+        if (!object.visible) return;
 
         if (auto mesh = object.as<Mesh>()) {
             auto geometry = mesh->geometry();
             if (geometry && geometry->hasAttribute("position")) {
-
                 auto mat = mesh->material();
                 Material* rawMat = mat.get();
-
-                // Determine features and extract material parameters
-                uint32_t features = FEAT_NONE;
-                Color diffuse(1, 1, 1);
-                float opacity = rawMat ? rawMat->opacity : 1.0f;
-                Color specularColor(0, 0, 0);
-                float shininess = 30.0f;
-                float roughness = 0.5f, metalness = 0.0f;
-                Color emissive(0, 0, 0);
-                Texture* diffuseMap = nullptr;
-                Texture* normalMap = nullptr;
-                Vector2 normalScale(1, 1);
-
-                if (auto m = dynamic_cast<MeshStandardMaterial*>(rawMat)) {
-                    features |= FEAT_LIGHTING | FEAT_PBR;
-                    diffuse = m->color; roughness = m->roughness; metalness = m->metalness;
-                    emissive = m->emissive;
-                    if (m->map) { diffuseMap = m->map.get(); features |= FEAT_TEXTURE; }
-                    if (m->normalMap) {
-                        normalMap = m->normalMap.get();
-                        normalScale = m->normalScale;
-                        features |= FEAT_NORMAL_MAP;
-                    }
-                } else if (auto m = dynamic_cast<MeshPhongMaterial*>(rawMat)) {
-                    features |= FEAT_LIGHTING | FEAT_SPECULAR;
-                    diffuse = m->color; specularColor = m->specular; shininess = m->shininess;
-                    emissive = m->emissive;
-                    if (m->map) { diffuseMap = m->map.get(); features |= FEAT_TEXTURE; }
-                } else if (auto m = dynamic_cast<MeshLambertMaterial*>(rawMat)) {
-                    features |= FEAT_LIGHTING;
-                    diffuse = m->color;
-                    emissive = m->emissive;
-                    if (m->map) { diffuseMap = m->map.get(); features |= FEAT_TEXTURE; }
-                } else if (auto m = dynamic_cast<MeshBasicMaterial*>(rawMat)) {
-                    diffuse = m->color;
-                    if (m->map) { diffuseMap = m->map.get(); features |= FEAT_TEXTURE; }
-                } else if (auto cm = dynamic_cast<MaterialWithColor*>(rawMat)) {
-                    diffuse = cm->color;
+                if (rawMat && rawMat->visible) {
+                    // Compute z-depth for sorting
+                    Vector3 objPos;
+                    objPos.setFromMatrixPosition(*mesh->matrixWorld);
+                    objPos.applyMatrix4(projScreenMatrix);
+                    renderList_.push(mesh, geometry.get(), rawMat, 0, objPos.z, std::nullopt);
                 }
-
-                // Face culling based on material.side
-                if (rawMat) {
-                    switch (rawMat->side) {
-                        case Side::Front: features |= CULL_BACK; break;
-                        case Side::Back:  features |= CULL_FRONT; break;
-                        case Side::Double: features |= CULL_NONE; break;
-                    }
-                }
-
-                // Wireframe mode
-                bool useWireframe = false;
-                if (auto wf = dynamic_cast<MaterialWithWireframe*>(rawMat)) {
-                    if (wf->wireframe) {
-                        features |= WIREFRAME_BIT;
-                        useWireframe = true;
-                    }
-                }
-
-                // Blend mode
-                if (rawMat) {
-                    auto blendVal = static_cast<int>(rawMat->blending);
-                    if (blendVal == 0)              features |= BLEND_DISABLED;   // Blending::None
-                    else if (blendVal == 2)         features |= BLEND_ADDITIVE;   // Blending::Additive
-                    else if (blendVal == 3)         features |= BLEND_SUBTRACTIVE;// Blending::Subtractive
-                    else if (blendVal == 4)         features |= BLEND_MULTIPLY;   // Blending::Multiply
-                    else                            features |= BLEND_NORMAL;     // Blending::Normal (default)
-                    // Transparent objects should not write to depth buffer
-                    if (rawMat->transparent) {
-                        features |= DEPTH_WRITE_OFF;
-                    }
-                }
-
-                // Shadow: if active and this object receives shadows, set FEAT_SHADOW
-                if (shadowState.active && mesh->receiveShadow) {
-                    features |= FEAT_SHADOW;
-                }
-
-                // Get/create pipeline for this feature set
-                auto& pe = getOrCreatePipeline(features);
-
-                // Upload transform uniforms (binding 0)
-                // Layout: model(64) + view(64) + proj(64) + normalCol0(16) + normalCol1(16) + normalCol2(16) + cameraPos(12) + pad(4) = 256
-                float transformData[TRANSFORM_UNIFORM_SIZE / sizeof(float)];
-                std::memset(transformData, 0, sizeof(transformData));
-                std::memcpy(transformData, mesh->matrixWorld->elements.data(), 64); // model
-                std::memcpy(transformData + 16, viewMatrix.elements.data(), 64);     // view
-                std::memcpy(transformData + 32, projectionMatrix.elements.data(), 64); // proj
-
-                // Normal matrix = inverse transpose of upper-left 3x3 of modelView
-                Matrix4 modelView;
-                modelView.multiplyMatrices(viewMatrix, *mesh->matrixWorld);
-                Matrix3 normalMatrix;
-                normalMatrix.setFromMatrix4(modelView);
-                normalMatrix.invert();
-                normalMatrix.transpose();
-                // Pack as 3 vec4 columns (WGSL mat3x3 in uniform is padded to 3 vec4)
-                auto& ne = normalMatrix.elements;
-                // Column 0
-                transformData[48] = ne[0]; transformData[49] = ne[1]; transformData[50] = ne[2]; transformData[51] = 0;
-                // Column 1
-                transformData[52] = ne[3]; transformData[53] = ne[4]; transformData[54] = ne[5]; transformData[55] = 0;
-                // Column 2
-                transformData[56] = ne[6]; transformData[57] = ne[7]; transformData[58] = ne[8]; transformData[59] = 0;
-
-                // Camera world position
-                Vector3 camPos;
-                camPos.setFromMatrixPosition(*camera.matrixWorld);
-                transformData[60] = camPos.x;
-                transformData[61] = camPos.y;
-                transformData[62] = camPos.z;
-                transformData[63] = 0;
-
-                wgpuQueueWriteBuffer(queue, transformBuffer, 0, transformData, TRANSFORM_UNIFORM_SIZE);
-
-                // Upload material uniforms (binding 1)
-                float matData[MATERIAL_UNIFORM_SIZE / sizeof(float)];
-                std::memset(matData, 0, sizeof(matData));
-                matData[0] = diffuse.r; matData[1] = diffuse.g; matData[2] = diffuse.b; matData[3] = 1.0f;
-                matData[4] = specularColor.r; matData[5] = specularColor.g; matData[6] = specularColor.b; matData[7] = shininess;
-                matData[8] = roughness; matData[9] = metalness; matData[10] = opacity; matData[11] = 0;
-                matData[12] = emissive.r; matData[13] = emissive.g; matData[14] = emissive.b; matData[15] = 0;
-                // flags: x=hasTexture, y=hasLighting, z=normalScale.x, w=normalScale.y
-                matData[16] = (features & FEAT_TEXTURE) ? 1.0f : 0.0f;
-                matData[17] = (features & FEAT_LIGHTING) ? 1.0f : 0.0f;
-                matData[18] = normalScale.x;
-                matData[19] = normalScale.y;
-                wgpuQueueWriteBuffer(queue, materialBuffer, 0, matData, MATERIAL_UNIFORM_SIZE);
-
-                // Build bind group dynamically
-                bool lit = features & (FEAT_LIGHTING | FEAT_SPECULAR | FEAT_PBR);
-                bool tex = features & FEAT_TEXTURE;
-
-                std::vector<WGPUBindGroupEntry> entries;
-                { WGPUBindGroupEntry e{}; e.binding = 0; e.buffer = transformBuffer; e.offset = 0; e.size = TRANSFORM_UNIFORM_SIZE; entries.push_back(e); }
-                { WGPUBindGroupEntry e{}; e.binding = 1; e.buffer = materialBuffer; e.offset = 0; e.size = MATERIAL_UNIFORM_SIZE; entries.push_back(e); }
-
-                if (lit) {
-                    WGPUBindGroupEntry e{}; e.binding = 2; e.buffer = lightBuffer; e.offset = 0; e.size = LIGHT_UNIFORM_SIZE; entries.push_back(e);
-                }
-
-                TextureEntry* texEntry = &dummyTexture;
-                if (tex && diffuseMap) {
-                    texEntry = &getOrCreateTexture(diffuseMap);
-                }
-                if (tex) {
-                    { WGPUBindGroupEntry e{}; e.binding = 3; e.textureView = texEntry->view; entries.push_back(e); }
-                    { WGPUBindGroupEntry e{}; e.binding = 4; e.sampler = texEntry->sampler; entries.push_back(e); }
-                }
-
-                if (features & FEAT_NORMAL_MAP) {
-                    TextureEntry* nmEntry = &dummyTexture;
-                    if (normalMap) {
-                        nmEntry = &getOrCreateTexture(normalMap);
-                    }
-                    { WGPUBindGroupEntry e{}; e.binding = 5; e.textureView = nmEntry->view; entries.push_back(e); }
-                    { WGPUBindGroupEntry e{}; e.binding = 6; e.sampler = nmEntry->sampler; entries.push_back(e); }
-                }
-
-                if (features & FEAT_SHADOW) {
-                    { WGPUBindGroupEntry e{}; e.binding = 7; e.buffer = shadowState.uniformBuffer; e.offset = 0; e.size = SHADOW_UNIFORM_SIZE; entries.push_back(e); }
-                    { WGPUBindGroupEntry e{}; e.binding = 8; e.textureView = shadowState.depthView; entries.push_back(e); }
-                    { WGPUBindGroupEntry e{}; e.binding = 9; e.sampler = shadowState.comparisonSampler; entries.push_back(e); }
-                }
-
-                WGPUBindGroupDescriptor bgDesc{};
-                bgDesc.label = {.data = "obj_bg", .length = 6};
-                bgDesc.layout = pe.bindGroupLayout;
-                bgDesc.entryCount = entries.size();
-                bgDesc.entries = entries.data();
-                WGPUBindGroup bg = wgpuDeviceCreateBindGroup(device, &bgDesc);
-
-                wgpuRenderPassEncoderSetPipeline(pass, pe.pipeline);
-                wgpuRenderPassEncoderSetBindGroup(pass, 0, bg, 0, nullptr);
-
-                auto& gb = getOrCreateGeometryBuffers(geometry.get());
-                if (gb.vertexBuffer) {
-                    wgpuRenderPassEncoderSetVertexBuffer(pass, 0, gb.vertexBuffer, 0,
-                                                         gb.vertexCount * VERTEX_STRIDE);
-                    if (useWireframe) {
-                        auto& wb = getOrCreateWireframeBuffers(geometry.get());
-                        if (wb.indexBuffer) {
-                            wgpuRenderPassEncoderSetIndexBuffer(pass, wb.indexBuffer,
-                                                                 WGPUIndexFormat_Uint32, 0,
-                                                                 wb.indexCount * sizeof(uint32_t));
-                            wgpuRenderPassEncoderDrawIndexed(pass, wb.indexCount, 1, 0, 0, 0);
-                            renderInfo.calls++;
-                            renderInfo.lines += wb.indexCount / 2;
-                        }
-                    } else if (gb.indexBuffer) {
-                        wgpuRenderPassEncoderSetIndexBuffer(pass, gb.indexBuffer,
-                                                             WGPUIndexFormat_Uint32, 0,
-                                                             gb.indexCount * sizeof(uint32_t));
-                        wgpuRenderPassEncoderDrawIndexed(pass, gb.indexCount, 1, 0, 0, 0);
-                        renderInfo.calls++;
-                        renderInfo.triangles += gb.indexCount / 3;
-                    } else {
-                        wgpuRenderPassEncoderDraw(pass, gb.vertexCount, 1, 0, 0);
-                        renderInfo.calls++;
-                        renderInfo.triangles += gb.vertexCount / 3;
-                    }
-                }
-
-                wgpuBindGroupRelease(bg);
             }
         }
 
         for (auto& child : object.children) {
-            renderObject(pass, *child, projectionMatrix, viewMatrix, camera);
+            collectRenderables(*child, projScreenMatrix);
         }
+    }
+
+    // Render a single item from the render list.
+    void renderItem(WGPURenderPassEncoder pass, const RenderItem* item,
+                    const Matrix4& projectionMatrix, const Matrix4& viewMatrix,
+                    const Camera& camera,
+                    uint32_t fogBits, const Color& fogColor,
+                    float fogNear, float fogFar, float fogDensity,
+                    uint32_t tonemapBits) {
+
+        auto* mesh = dynamic_cast<Mesh*>(item->object);
+        auto* geometry = item->geometry;
+        Material* rawMat = item->material;
+
+        // Determine features and extract material parameters
+        uint32_t features = FEAT_NONE;
+        Color diffuse(1, 1, 1);
+        float opacity = rawMat ? rawMat->opacity : 1.0f;
+        Color specularColor(0, 0, 0);
+        float shininess = 30.0f;
+        float roughness = 0.5f, metalness = 0.0f;
+        Color emissive(0, 0, 0);
+        Texture* diffuseMap = nullptr;
+        Texture* normalMap = nullptr;
+        Vector2 normalScale(1, 1);
+
+        if (auto m = dynamic_cast<MeshStandardMaterial*>(rawMat)) {
+            features |= FEAT_LIGHTING | FEAT_PBR;
+            diffuse = m->color; roughness = m->roughness; metalness = m->metalness;
+            emissive = m->emissive;
+            if (m->map) { diffuseMap = m->map.get(); features |= FEAT_TEXTURE; }
+            if (m->normalMap) {
+                normalMap = m->normalMap.get();
+                normalScale = m->normalScale;
+                features |= FEAT_NORMAL_MAP;
+            }
+        } else if (auto m = dynamic_cast<MeshPhongMaterial*>(rawMat)) {
+            features |= FEAT_LIGHTING | FEAT_SPECULAR;
+            diffuse = m->color; specularColor = m->specular; shininess = m->shininess;
+            emissive = m->emissive;
+            if (m->map) { diffuseMap = m->map.get(); features |= FEAT_TEXTURE; }
+        } else if (auto m = dynamic_cast<MeshLambertMaterial*>(rawMat)) {
+            features |= FEAT_LIGHTING;
+            diffuse = m->color;
+            emissive = m->emissive;
+            if (m->map) { diffuseMap = m->map.get(); features |= FEAT_TEXTURE; }
+        } else if (auto m = dynamic_cast<MeshBasicMaterial*>(rawMat)) {
+            diffuse = m->color;
+            if (m->map) { diffuseMap = m->map.get(); features |= FEAT_TEXTURE; }
+        } else if (auto cm = dynamic_cast<MaterialWithColor*>(rawMat)) {
+            diffuse = cm->color;
+        }
+
+        // Face culling based on material.side
+        if (rawMat) {
+            switch (rawMat->side) {
+                case Side::Front: features |= CULL_BACK; break;
+                case Side::Back:  features |= CULL_FRONT; break;
+                case Side::Double: features |= CULL_NONE; break;
+            }
+        }
+
+        // Wireframe mode
+        bool useWireframe = false;
+        if (auto wf = dynamic_cast<MaterialWithWireframe*>(rawMat)) {
+            if (wf->wireframe) {
+                features |= WIREFRAME_BIT;
+                useWireframe = true;
+            }
+        }
+
+        // Blend mode
+        if (rawMat) {
+            auto blendVal = static_cast<int>(rawMat->blending);
+            if (blendVal == 0)              features |= BLEND_DISABLED;
+            else if (blendVal == 2)         features |= BLEND_ADDITIVE;
+            else if (blendVal == 3)         features |= BLEND_SUBTRACTIVE;
+            else if (blendVal == 4)         features |= BLEND_MULTIPLY;
+            else                            features |= BLEND_NORMAL;
+            if (rawMat->transparent) {
+                features |= DEPTH_WRITE_OFF;
+            }
+        }
+
+        // Shadow
+        if (shadowState.active && mesh->receiveShadow) {
+            features |= FEAT_SHADOW;
+        }
+
+        // Fog and tone mapping
+        if (rawMat && rawMat->fog) {
+            features |= fogBits;
+        }
+        features |= tonemapBits;
+
+        // Get/create pipeline for this feature set
+        auto& pe = getOrCreatePipeline(features);
+
+        // Upload transform uniforms
+        float transformData[TRANSFORM_UNIFORM_SIZE / sizeof(float)];
+        std::memset(transformData, 0, sizeof(transformData));
+        std::memcpy(transformData, mesh->matrixWorld->elements.data(), 64);
+        std::memcpy(transformData + 16, viewMatrix.elements.data(), 64);
+        std::memcpy(transformData + 32, projectionMatrix.elements.data(), 64);
+
+        Matrix4 modelView;
+        modelView.multiplyMatrices(viewMatrix, *mesh->matrixWorld);
+        Matrix3 normalMatrix;
+        normalMatrix.setFromMatrix4(modelView);
+        normalMatrix.invert();
+        normalMatrix.transpose();
+        auto& ne = normalMatrix.elements;
+        transformData[48] = ne[0]; transformData[49] = ne[1]; transformData[50] = ne[2]; transformData[51] = 0;
+        transformData[52] = ne[3]; transformData[53] = ne[4]; transformData[54] = ne[5]; transformData[55] = 0;
+        transformData[56] = ne[6]; transformData[57] = ne[7]; transformData[58] = ne[8]; transformData[59] = 0;
+
+        Vector3 camPos;
+        camPos.setFromMatrixPosition(*camera.matrixWorld);
+        transformData[60] = camPos.x;
+        transformData[61] = camPos.y;
+        transformData[62] = camPos.z;
+        transformData[63] = 0;
+
+        wgpuQueueWriteBuffer(queue, transformBuffer, 0, transformData, TRANSFORM_UNIFORM_SIZE);
+
+        // Upload material uniforms (now includes fog and tone mapping data)
+        float matData[MATERIAL_UNIFORM_SIZE / sizeof(float)];
+        std::memset(matData, 0, sizeof(matData));
+        matData[0] = diffuse.r; matData[1] = diffuse.g; matData[2] = diffuse.b; matData[3] = 1.0f;
+        matData[4] = specularColor.r; matData[5] = specularColor.g; matData[6] = specularColor.b; matData[7] = shininess;
+        matData[8] = roughness; matData[9] = metalness; matData[10] = opacity; matData[11] = 0;
+        matData[12] = emissive.r; matData[13] = emissive.g; matData[14] = emissive.b; matData[15] = 0;
+        matData[16] = (features & FEAT_TEXTURE) ? 1.0f : 0.0f;
+        matData[17] = (features & FEAT_LIGHTING) ? 1.0f : 0.0f;
+        matData[18] = normalScale.x;
+        matData[19] = normalScale.y;
+        // fogColor (vec4, offset 20)
+        matData[20] = fogColor.r; matData[21] = fogColor.g; matData[22] = fogColor.b; matData[23] = 1.0f;
+        // fogParams: x=near, y=far, z=density, w=toneMappingExposure (vec4, offset 24)
+        matData[24] = fogNear; matData[25] = fogFar; matData[26] = fogDensity;
+        matData[27] = scope.toneMappingExposure;
+        wgpuQueueWriteBuffer(queue, materialBuffer, 0, matData, MATERIAL_UNIFORM_SIZE);
+
+        // Build bind group dynamically
+        bool lit = features & (FEAT_LIGHTING | FEAT_SPECULAR | FEAT_PBR);
+        bool tex = features & FEAT_TEXTURE;
+
+        std::vector<WGPUBindGroupEntry> entries;
+        { WGPUBindGroupEntry e{}; e.binding = 0; e.buffer = transformBuffer; e.offset = 0; e.size = TRANSFORM_UNIFORM_SIZE; entries.push_back(e); }
+        { WGPUBindGroupEntry e{}; e.binding = 1; e.buffer = materialBuffer; e.offset = 0; e.size = MATERIAL_UNIFORM_SIZE; entries.push_back(e); }
+
+        if (lit) {
+            WGPUBindGroupEntry e{}; e.binding = 2; e.buffer = lightBuffer; e.offset = 0; e.size = LIGHT_UNIFORM_SIZE; entries.push_back(e);
+        }
+
+        TextureEntry* texEntry = &dummyTexture;
+        if (tex && diffuseMap) {
+            texEntry = &getOrCreateTexture(diffuseMap);
+        }
+        if (tex) {
+            { WGPUBindGroupEntry e{}; e.binding = 3; e.textureView = texEntry->view; entries.push_back(e); }
+            { WGPUBindGroupEntry e{}; e.binding = 4; e.sampler = texEntry->sampler; entries.push_back(e); }
+        }
+
+        if (features & FEAT_NORMAL_MAP) {
+            TextureEntry* nmEntry = &dummyTexture;
+            if (normalMap) {
+                nmEntry = &getOrCreateTexture(normalMap);
+            }
+            { WGPUBindGroupEntry e{}; e.binding = 5; e.textureView = nmEntry->view; entries.push_back(e); }
+            { WGPUBindGroupEntry e{}; e.binding = 6; e.sampler = nmEntry->sampler; entries.push_back(e); }
+        }
+
+        if (features & FEAT_SHADOW) {
+            { WGPUBindGroupEntry e{}; e.binding = 7; e.buffer = shadowState.uniformBuffer; e.offset = 0; e.size = SHADOW_UNIFORM_SIZE; entries.push_back(e); }
+            { WGPUBindGroupEntry e{}; e.binding = 8; e.textureView = shadowState.depthView; entries.push_back(e); }
+            { WGPUBindGroupEntry e{}; e.binding = 9; e.sampler = shadowState.comparisonSampler; entries.push_back(e); }
+        }
+
+        WGPUBindGroupDescriptor bgDesc{};
+        bgDesc.label = {.data = "obj_bg", .length = 6};
+        bgDesc.layout = pe.bindGroupLayout;
+        bgDesc.entryCount = entries.size();
+        bgDesc.entries = entries.data();
+        WGPUBindGroup bg = wgpuDeviceCreateBindGroup(device, &bgDesc);
+
+        wgpuRenderPassEncoderSetPipeline(pass, pe.pipeline);
+        wgpuRenderPassEncoderSetBindGroup(pass, 0, bg, 0, nullptr);
+
+        auto geom = mesh->geometry();
+        auto& gb = getOrCreateGeometryBuffers(geom.get());
+        if (gb.vertexBuffer) {
+            wgpuRenderPassEncoderSetVertexBuffer(pass, 0, gb.vertexBuffer, 0,
+                                                     gb.vertexCount * VERTEX_STRIDE);
+            if (useWireframe) {
+                auto& wb = getOrCreateWireframeBuffers(geom.get());
+                if (wb.indexBuffer) {
+                    wgpuRenderPassEncoderSetIndexBuffer(pass, wb.indexBuffer,
+                                                         WGPUIndexFormat_Uint32, 0,
+                                                         wb.indexCount * sizeof(uint32_t));
+                    wgpuRenderPassEncoderDrawIndexed(pass, wb.indexCount, 1, 0, 0, 0);
+                    renderInfo.calls++;
+                    renderInfo.lines += wb.indexCount / 2;
+                }
+            } else if (gb.indexBuffer) {
+                wgpuRenderPassEncoderSetIndexBuffer(pass, gb.indexBuffer,
+                                                         WGPUIndexFormat_Uint32, 0,
+                                                         gb.indexCount * sizeof(uint32_t));
+                wgpuRenderPassEncoderDrawIndexed(pass, gb.indexCount, 1, 0, 0, 0);
+                renderInfo.calls++;
+                renderInfo.triangles += gb.indexCount / 3;
+            } else {
+                wgpuRenderPassEncoderDraw(pass, gb.vertexCount, 1, 0, 0);
+                renderInfo.calls++;
+                renderInfo.triangles += gb.vertexCount / 3;
+            }
+        }
+
+        wgpuBindGroupRelease(bg);
     }
 
     void dispose() {
@@ -1956,7 +2089,7 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
 // --- DawnRenderer public API ---
 
 DawnRenderer::DawnRenderer(Canvas& canvas)
-    : pimpl_(std::make_unique<Impl>(canvas)) {}
+    : pimpl_(std::make_unique<Impl>(*this, canvas)) {}
 
 void DawnRenderer::render(Object3D& scene, Camera& camera) {
     pimpl_->render(scene, camera);
