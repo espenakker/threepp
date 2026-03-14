@@ -235,6 +235,7 @@ set(privateHeaders
         "threepp/renderers/GLCubeRenderTarget.hpp"
 
         "threepp/renderers/common/Lights.hpp"
+        "threepp/renderers/common/RenderLists.hpp"
         "threepp/renderers/common/RenderStates.hpp"
         "threepp/renderers/common/RendererCapabilities.hpp"
         "threepp/renderers/common/ShadowConfig.hpp"
@@ -442,6 +443,7 @@ set(sources
         "threepp/renderers/GLRenderTarget.cpp"
 
         "threepp/renderers/common/Lights.cpp"
+        "threepp/renderers/common/RenderLists.cpp"
         "threepp/renderers/common/RenderStates.cpp"
 
         "threepp/renderers/gl/GLAttributes.cpp"
