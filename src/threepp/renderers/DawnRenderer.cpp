@@ -1040,6 +1040,7 @@ struct DawnRenderer::Impl {
         sd.magFilter = WGPUFilterMode_Linear;
         sd.minFilter = WGPUFilterMode_Linear;
         sd.compare = WGPUCompareFunction_Less;
+        sd.maxAnisotropy = 1; // WebGPU requires maxAnisotropy >= 1
         shadowState.comparisonSampler = wgpuDeviceCreateSampler(device, &sd);
 
         // Create shadow uniform buffer
@@ -1399,6 +1400,16 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
         Matrix4 projectionMatrix = camera.projectionMatrix;
         Matrix4 viewMatrix = camera.matrixWorldInverse;
 
+        // Remap NDC z from [-1,1] (OpenGL convention used by three.js matrices)
+        // to [0,1] (WebGPU/Vulkan convention). Apply: z' = 0.5*z + 0.5*w
+        {
+            auto& e = projectionMatrix.elements;
+            e[2]  = 0.5f * e[2]  + 0.5f * e[3];
+            e[6]  = 0.5f * e[6]  + 0.5f * e[7];
+            e[10] = 0.5f * e[10] + 0.5f * e[11];
+            e[14] = 0.5f * e[14] + 0.5f * e[15];
+        }
+
         // Upload world-space light data directly from the scene
         uploadLightDataWorldSpace(scene);
 
@@ -1427,10 +1438,18 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
                 shadowState.normalBias = shadow->normalBias;
                 shadowState.active = true;
 
-                // Upload shadow uniform buffer
+                // Upload shadow uniform buffer (with z-remapped light VP)
+                Matrix4 shadowVP = shadow->matrix;
+                {
+                    auto& e = shadowVP.elements;
+                    e[2]  = 0.5f * e[2]  + 0.5f * e[3];
+                    e[6]  = 0.5f * e[6]  + 0.5f * e[7];
+                    e[10] = 0.5f * e[10] + 0.5f * e[11];
+                    e[14] = 0.5f * e[14] + 0.5f * e[15];
+                }
                 float shadowData[SHADOW_UNIFORM_SIZE / sizeof(float)];
                 std::memset(shadowData, 0, sizeof(shadowData));
-                std::memcpy(shadowData, shadow->matrix.elements.data(), 64);
+                std::memcpy(shadowData, shadowVP.elements.data(), 64);
                 shadowData[16] = shadow->bias;
                 shadowData[17] = shadow->normalBias;
                 wgpuQueueWriteBuffer(queue, shadowState.uniformBuffer, 0, shadowData, SHADOW_UNIFORM_SIZE);
@@ -1440,9 +1459,17 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
                 shadowEncDesc.label = {.data = "shadow_enc", .length = 10};
                 WGPUCommandEncoder shadowEncoder = wgpuDeviceCreateCommandEncoder(device, &shadowEncDesc);
 
-                // Compute light VP for depth-only rendering (without bias)
+                // Compute light VP for depth-only rendering (with z remap)
+                Matrix4 lightProj = shadow->camera->projectionMatrix;
+                {
+                    auto& e = lightProj.elements;
+                    e[2]  = 0.5f * e[2]  + 0.5f * e[3];
+                    e[6]  = 0.5f * e[6]  + 0.5f * e[7];
+                    e[10] = 0.5f * e[10] + 0.5f * e[11];
+                    e[14] = 0.5f * e[14] + 0.5f * e[15];
+                }
                 Matrix4 lightVP;
-                lightVP.multiplyMatrices(shadow->camera->projectionMatrix, shadow->camera->matrixWorldInverse);
+                lightVP.multiplyMatrices(lightProj, shadow->camera->matrixWorldInverse);
 
                 renderShadowPass(shadowEncoder, scene, lightVP);
 
