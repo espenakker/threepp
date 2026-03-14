@@ -17,7 +17,7 @@
 
 #include "threepp/threepp.hpp"
 #include "threepp/renderers/DawnRenderer.hpp"
-#include "threepp/renderers/GLRenderTarget.hpp"
+#include "threepp/renderers/RenderTarget.hpp"
 #include "threepp/textures/Texture.hpp"
 
 #include <webgpu/webgpu.h>
@@ -143,7 +143,7 @@ namespace {
         GLRenderer renderer(glCanvas().size());
         renderer.setClearColor(clearColor);
 
-        auto target = GLRenderTarget::create(RT_WIDTH, RT_HEIGHT, GLRenderTarget::Options{});
+        auto target = RenderTarget::create(RT_WIDTH, RT_HEIGHT, RenderTarget::Options{});
         renderer.setRenderTarget(target.get());
         renderer.render(scene, camera);
 
@@ -164,7 +164,7 @@ namespace {
         DawnRenderer renderer(*dawnCanvasPtr);
         renderer.setClearColor(clearColor);
 
-        auto target = GLRenderTarget::create(RT_WIDTH, RT_HEIGHT, GLRenderTarget::Options{});
+        auto target = RenderTarget::create(RT_WIDTH, RT_HEIGHT, RenderTarget::Options{});
         renderer.setRenderTarget(target.get());
         renderer.render(scene, camera);
 
@@ -187,7 +187,7 @@ TEST_CASE("GL: clear color produces expected pixels") {
     GLRenderer renderer(glCanvas().size());
     renderer.setClearColor(Color(1.0f, 0.0f, 0.0f));
 
-    auto target = GLRenderTarget::create(RT_WIDTH, RT_HEIGHT, GLRenderTarget::Options{});
+    auto target = RenderTarget::create(RT_WIDTH, RT_HEIGHT, RenderTarget::Options{});
     renderer.setRenderTarget(target.get());
 
     auto scene = Scene::create();
@@ -205,7 +205,7 @@ TEST_CASE("GL: clear color produces expected pixels") {
 TEST_CASE("GL: readback dimensions match render target") {
     GLRenderer renderer(glCanvas().size());
 
-    auto target = GLRenderTarget::create(RT_WIDTH, RT_HEIGHT, GLRenderTarget::Options{});
+    auto target = RenderTarget::create(RT_WIDTH, RT_HEIGHT, RenderTarget::Options{});
     renderer.setRenderTarget(target.get());
 
     auto scene = Scene::create();
@@ -857,7 +857,7 @@ TEST_CASE("Dawn: setPixelRatio updates ratio", "[dawn]") {
     auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
     camera->position.z = 5;
 
-    auto target = GLRenderTarget::create(RT_WIDTH, RT_HEIGHT, GLRenderTarget::Options{});
+    auto target = RenderTarget::create(RT_WIDTH, RT_HEIGHT, RenderTarget::Options{});
     renderer.setRenderTarget(target.get());
     renderer.setClearColor(Color(0.0f, 0.0f, 1.0f));
     renderer.render(*scene, *camera);
@@ -895,7 +895,7 @@ TEST_CASE("Dawn: viewport restricts rendering region", "[dawn]") {
     DawnRenderer renderer(*canvas);
     renderer.setClearColor(Color(0x000000));
 
-    auto target = GLRenderTarget::create(RT_WIDTH, RT_HEIGHT, GLRenderTarget::Options{});
+    auto target = RenderTarget::create(RT_WIDTH, RT_HEIGHT, RenderTarget::Options{});
     renderer.setRenderTarget(target.get());
 
     // Render full viewport
@@ -1249,7 +1249,7 @@ TEST_CASE("Dawn: render info tracks draw calls", "[dawn]") {
     DawnRenderer renderer(*canvas);
     renderer.setClearColor(Color(0x000000));
 
-    auto target = GLRenderTarget::create(RT_WIDTH, RT_HEIGHT, GLRenderTarget::Options{});
+    auto target = RenderTarget::create(RT_WIDTH, RT_HEIGHT, RenderTarget::Options{});
     renderer.setRenderTarget(target.get());
     renderer.render(*scene, *camera);
 
@@ -1271,7 +1271,7 @@ TEST_CASE("Dawn: getActiveCubeFace and getActiveMipmapLevel", "[dawn]") {
 
     DawnRenderer renderer(*canvas);
 
-    auto target = GLRenderTarget::create(RT_WIDTH, RT_HEIGHT, GLRenderTarget::Options{});
+    auto target = RenderTarget::create(RT_WIDTH, RT_HEIGHT, RenderTarget::Options{});
     renderer.setRenderTarget(target.get(), 2, 3);
 
     CHECK(renderer.getActiveCubeFace() == 2);

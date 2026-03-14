@@ -9,10 +9,12 @@ add_example(NAME "multiple_scenes")
 
 if (THREEPP_WITH_DAWN)
     add_example(NAME "dawn_triangle")
-    add_example(NAME "dawn_ocean")
+
+    # Standalone raw wgpu-native examples (do not use DawnRenderer)
+    add_executable(dawn_ocean standalone/dawn_ocean.cpp)
+    target_link_libraries(dawn_ocean PRIVATE threepp "${WGPU_LIBRARY}" glfw)
     target_include_directories(dawn_ocean PRIVATE
         "${WGPU_INCLUDE_DIR}"
         "${PROJECT_SOURCE_DIR}/src/external/glfw/include"
     )
-    target_link_libraries(dawn_ocean PRIVATE "${WGPU_LIBRARY}" glfw)
 endif ()

@@ -1,7 +1,7 @@
 
 #include "Lights.hpp"
 
-#include "threepp/renderers/GLRenderTarget.hpp"
+#include "threepp/renderers/RenderTarget.hpp"
 
 #include "threepp/lights/LightProbe.hpp"
 #include "threepp/lights/LightShadow.hpp"

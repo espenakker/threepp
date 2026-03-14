@@ -208,6 +208,7 @@ set(publicHeaders
         "threepp/renderers/Renderer.hpp"
         "threepp/renderers/GLRenderer.hpp"
         "threepp/renderers/DawnRenderer.hpp"
+        "threepp/renderers/RenderTarget.hpp"
         "threepp/renderers/GLRenderTarget.hpp"
 
         "threepp/renderers/gl/GLInfo.hpp"
@@ -440,7 +441,7 @@ set(sources
         "threepp/utils/TaskManager.cpp"
 
         "threepp/renderers/GLRenderer.cpp"
-        "threepp/renderers/GLRenderTarget.cpp"
+        "threepp/renderers/RenderTarget.cpp"
 
         "threepp/renderers/common/Lights.cpp"
         "threepp/renderers/common/RenderLists.cpp"
@@ -544,6 +545,8 @@ endif ()
 if (THREEPP_WITH_DAWN)
     list(APPEND sources
             "threepp/renderers/DawnRenderer.cpp"
+            "threepp/renderers/dawn/DawnGeometries.cpp"
+            "threepp/renderers/dawn/DawnTextures.cpp"
     )
     if (APPLE)
         list(APPEND sources

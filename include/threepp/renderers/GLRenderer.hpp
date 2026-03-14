@@ -17,7 +17,7 @@ namespace threepp {
     class Object3D;
     class Material;
     class Texture;
-    class GLRenderTarget;
+    class RenderTarget;
     class BufferAttribute;
 
     class GLRenderer : public Renderer {
@@ -77,9 +77,9 @@ namespace threepp {
 
         void render(Object3D& scene, Camera& camera) override;
 
-        GLRenderTarget* getRenderTarget() override;
+        RenderTarget* getRenderTarget() override;
 
-        void setRenderTarget(GLRenderTarget* renderTarget, int activeCubeFace = 0, int activeMipmapLevel = 0) override;
+        void setRenderTarget(RenderTarget* renderTarget, int activeCubeFace = 0, int activeMipmapLevel = 0) override;
 
         [[nodiscard]] std::vector<unsigned char> readRGBPixels() override;
 
