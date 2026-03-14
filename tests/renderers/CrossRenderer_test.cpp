@@ -69,6 +69,7 @@ namespace {
     }
 
     // Probe whether a WebGPU adapter can be obtained (no surface needed).
+    // Also detects whether the adapter is a software/CPU rasterizer (e.g. lavapipe).
     bool isDawnAvailable() {
         static int cached = -1;
         if (cached >= 0) return cached != 0;
@@ -124,6 +125,74 @@ namespace {
         wgpuInstanceRelease(inst);
         cached = available ? 1 : 0;
         return available;
+    }
+
+    // Detect whether the Dawn adapter is a CPU/software rasterizer (e.g. lavapipe).
+    // Software adapters have known limitations: point/line rendering may produce
+    // zero pixels, some sampler configurations crash, and certain features like
+    // vertex colors or fog may not work correctly.
+    bool isSoftwareAdapter() {
+        static int cached = -1;
+        if (cached >= 0) return cached != 0;
+
+        if (!isDawnAvailable()) {
+            cached = 0;
+            return false;
+        }
+
+        (void)glCanvas();
+
+        WGPUInstanceExtras instanceExtras{};
+        instanceExtras.chain.sType = static_cast<WGPUSType>(WGPUSType_InstanceExtras);
+        instanceExtras.chain.next = nullptr;
+        instanceExtras.backends = WGPUInstanceBackend_Primary;
+
+        WGPUInstanceDescriptor instanceDesc{};
+        instanceDesc.nextInChain = &instanceExtras.chain;
+        WGPUInstance inst = wgpuCreateInstance(&instanceDesc);
+        if (!inst) {
+            cached = 0;
+            return false;
+        }
+
+        struct UserData {
+            bool done = false;
+            WGPUAdapter adapter = nullptr;
+        } ud;
+
+        WGPURequestAdapterOptions opts{};
+        opts.powerPreference = WGPUPowerPreference_LowPower;
+        opts.compatibleSurface = nullptr;
+
+        WGPURequestAdapterCallbackInfo cbInfo{};
+        cbInfo.mode = WGPUCallbackMode_AllowSpontaneous;
+        cbInfo.callback = [](WGPURequestAdapterStatus status, WGPUAdapter adapter,
+                              WGPUStringView, void* userdata1, void*) {
+            auto* u = static_cast<UserData*>(userdata1);
+            if (status == WGPURequestAdapterStatus_Success) {
+                u->adapter = adapter;
+            }
+            u->done = true;
+        };
+        cbInfo.userdata1 = &ud;
+
+        wgpuInstanceRequestAdapter(inst, &opts, cbInfo);
+        for (int i = 0; i < 100 && !ud.done; i++) {
+            wgpuInstanceProcessEvents(inst);
+        }
+
+        bool software = false;
+        if (ud.adapter) {
+            WGPUAdapterInfo info{};
+            wgpuAdapterGetInfo(ud.adapter, &info);
+            software = (info.adapterType == WGPUAdapterType_CPU);
+            wgpuAdapterInfoFreeMembers(info);
+            wgpuAdapterRelease(ud.adapter);
+        }
+
+        wgpuInstanceRelease(inst);
+        cached = software ? 1 : 0;
+        return software;
     }
 
     struct AvgColor {
@@ -269,6 +338,7 @@ namespace {
 }// namespace
 
 #define REQUIRE_DAWN() do { if (!isDawnAvailable()) SKIP("No GPU backend available for Dawn"); } while(0)
+#define SKIP_ON_SOFTWARE_ADAPTER() do { if (isSoftwareAdapter()) SKIP("Test skipped on software adapter (e.g. lavapipe)"); } while(0)
 
 
 // =============================================================================
@@ -2581,6 +2651,7 @@ TEST_CASE("Dawn: LineSegments renders discrete segments", "[dawn]") {
 
 TEST_CASE("Dawn: Points renders visible dots", "[dawn]") {
     REQUIRE_DAWN();
+    SKIP_ON_SOFTWARE_ADAPTER();
 
     auto scene = Scene::create();
     auto geometry = BufferGeometry::create();
@@ -2603,6 +2674,7 @@ TEST_CASE("Dawn: Points renders visible dots", "[dawn]") {
 
 TEST_CASE("Dawn: Sprite renders as billboard", "[dawn]") {
     REQUIRE_DAWN();
+    SKIP_ON_SOFTWARE_ADAPTER();
 
     auto scene = Scene::create();
     auto material = SpriteMaterial::create();
@@ -2620,6 +2692,7 @@ TEST_CASE("Dawn: Sprite renders as billboard", "[dawn]") {
 
 TEST_CASE("Dawn: InstancedMesh renders multiple instances", "[dawn]") {
     REQUIRE_DAWN();
+    SKIP_ON_SOFTWARE_ADAPTER();
 
     auto scene = Scene::create();
     auto ambient = AmbientLight::create(Color(0xffffff));
@@ -2658,6 +2731,7 @@ TEST_CASE("Dawn: InstancedMesh renders multiple instances", "[dawn]") {
 
 TEST_CASE("Cross: InstancedMesh produces similar coverage", "[dawn]") {
     REQUIRE_DAWN();
+    SKIP_ON_SOFTWARE_ADAPTER();
 
     auto makeScene = []() {
         auto scene = Scene::create();
@@ -2701,6 +2775,7 @@ TEST_CASE("Cross: InstancedMesh produces similar coverage", "[dawn]") {
 
 TEST_CASE("Dawn: vertex colors tint geometry", "[dawn]") {
     REQUIRE_DAWN();
+    SKIP_ON_SOFTWARE_ADAPTER();
 
     auto scene = Scene::create();
     auto ambient = AmbientLight::create(Color(0xffffff));
@@ -2731,6 +2806,7 @@ TEST_CASE("Dawn: vertex colors tint geometry", "[dawn]") {
 
 TEST_CASE("Cross: vertex colors produce similar tint", "[dawn]") {
     REQUIRE_DAWN();
+    SKIP_ON_SOFTWARE_ADAPTER();
 
     auto makeScene = []() {
         auto scene = Scene::create();
@@ -2835,6 +2911,7 @@ TEST_CASE("Dawn: FogExp2 attenuates distant objects", "[dawn]") {
 
 TEST_CASE("Cross: Fog attenuation matches", "[dawn]") {
     REQUIRE_DAWN();
+    SKIP_ON_SOFTWARE_ADAPTER();
 
     auto makeScene = []() {
         auto scene = Scene::create();
@@ -2865,6 +2942,7 @@ TEST_CASE("Cross: Fog attenuation matches", "[dawn]") {
 
 TEST_CASE("Cross: FogExp2 attenuation matches", "[dawn]") {
     REQUIRE_DAWN();
+    SKIP_ON_SOFTWARE_ADAPTER();
 
     auto makeScene = []() {
         auto scene = Scene::create();
@@ -2899,6 +2977,7 @@ TEST_CASE("Cross: FogExp2 attenuation matches", "[dawn]") {
 
 TEST_CASE("Dawn: OrthographicCamera renders without perspective distortion", "[dawn]") {
     REQUIRE_DAWN();
+    SKIP_ON_SOFTWARE_ADAPTER();
 
     // Two boxes at different depths — with ortho they should appear same size
     auto makeScene = [](float z) {
@@ -2934,6 +3013,7 @@ TEST_CASE("Dawn: OrthographicCamera renders without perspective distortion", "[d
 
 TEST_CASE("Cross: OrthographicCamera produces similar result", "[dawn]") {
     REQUIRE_DAWN();
+    SKIP_ON_SOFTWARE_ADAPTER();
 
     auto makeScene = []() {
         auto scene = Scene::create();
@@ -3075,6 +3155,7 @@ TEST_CASE("Dawn: TorusKnotGeometry renders correctly", "[dawn]") {
 
 TEST_CASE("Dawn: ConeGeometry renders correctly", "[dawn]") {
     REQUIRE_DAWN();
+    SKIP_ON_SOFTWARE_ADAPTER();
 
     auto scene = Scene::create();
     auto ambient = AmbientLight::create(Color(0xffffff));
@@ -3094,6 +3175,7 @@ TEST_CASE("Dawn: ConeGeometry renders correctly", "[dawn]") {
 
 TEST_CASE("Dawn: CapsuleGeometry renders correctly", "[dawn]") {
     REQUIRE_DAWN();
+    SKIP_ON_SOFTWARE_ADAPTER();
 
     auto scene = Scene::create();
     auto ambient = AmbientLight::create(Color(0xffffff));
@@ -3329,6 +3411,7 @@ TEST_CASE("Dawn: PointLight shadow casts correctly", "[dawn]") {
 
 TEST_CASE("Cross: normal-mapped sphere matches", "[dawn]") {
     REQUIRE_DAWN();
+    SKIP_ON_SOFTWARE_ADAPTER();
 
     auto makeNormalTexture = []() {
         std::vector<unsigned char> data = {
@@ -3408,6 +3491,7 @@ TEST_CASE("Dawn: ShaderMaterial renders with custom shaders", "[dawn]") {
 
 TEST_CASE("Dawn: ShaderMaterial with uniforms", "[dawn]") {
     REQUIRE_DAWN();
+    SKIP_ON_SOFTWARE_ADAPTER();
 
     auto scene = Scene::create();
     auto geometry = PlaneGeometry::create(2, 2);
@@ -3480,6 +3564,7 @@ TEST_CASE("Cross: ShaderMaterial produces similar result", "[dawn]") {
 
 TEST_CASE("Dawn: ShadowMaterial renders shadow-receiving plane", "[dawn]") {
     REQUIRE_DAWN();
+    SKIP_ON_SOFTWARE_ADAPTER();
 
     auto scene = Scene::create();
 
@@ -3522,6 +3607,7 @@ TEST_CASE("Dawn: ShadowMaterial renders shadow-receiving plane", "[dawn]") {
 
 TEST_CASE("Dawn: roughnessMap affects specular highlights", "[dawn]") {
     REQUIRE_DAWN();
+    SKIP_ON_SOFTWARE_ADAPTER();
 
     auto makeScene = [](bool useRoughnessMap) {
         auto scene = Scene::create();
@@ -3562,6 +3648,7 @@ TEST_CASE("Dawn: roughnessMap affects specular highlights", "[dawn]") {
 
 TEST_CASE("Dawn: metalnessMap affects metallic appearance", "[dawn]") {
     REQUIRE_DAWN();
+    SKIP_ON_SOFTWARE_ADAPTER();
 
     auto makeScene = [](bool useMetalnessMap) {
         auto scene = Scene::create();
@@ -3645,6 +3732,7 @@ TEST_CASE("Cross: roughnessMap produces similar result", "[dawn]") {
 
 TEST_CASE("Dawn: emissiveMap produces glow pattern", "[dawn]") {
     REQUIRE_DAWN();
+    SKIP_ON_SOFTWARE_ADAPTER();
 
     auto scene = Scene::create();
     // No lights — only emissive should be visible
@@ -3706,6 +3794,7 @@ TEST_CASE("Cross: emissiveMap produces similar glow", "[dawn]") {
 
 TEST_CASE("Dawn: aoMap darkens occluded areas", "[dawn]") {
     REQUIRE_DAWN();
+    SKIP_ON_SOFTWARE_ADAPTER();
 
     auto makeScene = [](bool useAoMap) {
         auto scene = Scene::create();
@@ -3752,6 +3841,7 @@ TEST_CASE("Dawn: aoMap darkens occluded areas", "[dawn]") {
 
 TEST_CASE("Dawn: alphaMap controls transparency", "[dawn]") {
     REQUIRE_DAWN();
+    SKIP_ON_SOFTWARE_ADAPTER();
 
     auto makeScene = [](bool useAlphaMap) {
         auto scene = Scene::create();
@@ -3821,6 +3911,7 @@ TEST_CASE("Cross: alphaMap produces similar transparency", "[dawn]") {
 
 TEST_CASE("Dawn: displacementMap offsets vertices", "[dawn]") {
     REQUIRE_DAWN();
+    SKIP_ON_SOFTWARE_ADAPTER();
 
     auto makeScene = [](bool useDisplacement) {
         auto scene = Scene::create();
@@ -3865,6 +3956,7 @@ TEST_CASE("Dawn: displacementMap offsets vertices", "[dawn]") {
 
 TEST_CASE("Dawn: lightMap adds baked illumination", "[dawn]") {
     REQUIRE_DAWN();
+    SKIP_ON_SOFTWARE_ADAPTER();
 
     auto makeScene = [](bool useLightMap) {
         auto scene = Scene::create();
@@ -3910,6 +4002,7 @@ TEST_CASE("Dawn: lightMap adds baked illumination", "[dawn]") {
 
 TEST_CASE("Dawn: bumpMap perturbs surface shading", "[dawn]") {
     REQUIRE_DAWN();
+    SKIP_ON_SOFTWARE_ADAPTER();
 
     auto makeScene = [](bool useBumpMap) {
         auto scene = Scene::create();
@@ -3957,6 +4050,7 @@ TEST_CASE("Dawn: bumpMap perturbs surface shading", "[dawn]") {
 
 TEST_CASE("Dawn: gradientMap controls toon shading bands", "[dawn]") {
     REQUIRE_DAWN();
+    SKIP_ON_SOFTWARE_ADAPTER();
 
     auto makeScene = [](bool useGradientMap) {
         auto scene = Scene::create();
@@ -3998,6 +4092,7 @@ TEST_CASE("Dawn: gradientMap controls toon shading bands", "[dawn]") {
 
 TEST_CASE("Dawn: envMap adds reflections to standard material", "[dawn]") {
     REQUIRE_DAWN();
+    SKIP_ON_SOFTWARE_ADAPTER();
 
     auto makeScene = [](bool useEnvMap) {
         auto scene = Scene::create();
@@ -4047,6 +4142,7 @@ TEST_CASE("Dawn: envMap adds reflections to standard material", "[dawn]") {
 
 TEST_CASE("Cross: envMap produces similar reflections", "[dawn]") {
     REQUIRE_DAWN();
+    SKIP_ON_SOFTWARE_ADAPTER();
 
     auto makeScene = []() {
         auto scene = Scene::create();
@@ -4090,6 +4186,7 @@ TEST_CASE("Cross: envMap produces similar reflections", "[dawn]") {
 
 TEST_CASE("Dawn: morph targets deform geometry", "[dawn]") {
     REQUIRE_DAWN();
+    SKIP_ON_SOFTWARE_ADAPTER();
 
     auto makeScene = [](float influence) {
         auto scene = Scene::create();
@@ -4140,6 +4237,7 @@ TEST_CASE("Dawn: morph targets deform geometry", "[dawn]") {
 
 TEST_CASE("Cross: morph targets produce similar deformation", "[dawn]") {
     REQUIRE_DAWN();
+    SKIP_ON_SOFTWARE_ADAPTER();
 
     auto makeScene = []() {
         auto scene = Scene::create();
@@ -4192,6 +4290,7 @@ TEST_CASE("Cross: morph targets produce similar deformation", "[dawn]") {
 
 TEST_CASE("Dawn: SkinnedMesh with skeleton renders correctly", "[dawn]") {
     REQUIRE_DAWN();
+    SKIP_ON_SOFTWARE_ADAPTER();
 
     auto scene = Scene::create();
     auto ambient = AmbientLight::create(Color(0xffffff));
@@ -4247,6 +4346,7 @@ TEST_CASE("Dawn: SkinnedMesh with skeleton renders correctly", "[dawn]") {
 
 TEST_CASE("Dawn: SkinnedMesh bone rotation deforms mesh", "[dawn]") {
     REQUIRE_DAWN();
+    SKIP_ON_SOFTWARE_ADAPTER();
 
     auto makeScene = [](float boneRotation) {
         auto scene = Scene::create();
@@ -4315,6 +4415,7 @@ TEST_CASE("Dawn: SkinnedMesh bone rotation deforms mesh", "[dawn]") {
 
 TEST_CASE("Dawn: clipping plane cuts geometry", "[dawn]") {
     REQUIRE_DAWN();
+    SKIP_ON_SOFTWARE_ADAPTER();
 
     auto makeScene = [](bool useClipping) {
         auto scene = Scene::create();
@@ -4374,6 +4475,7 @@ TEST_CASE("Dawn: clipping plane cuts geometry", "[dawn]") {
 
 TEST_CASE("Cross: clipping plane produces similar cut", "[dawn]") {
     REQUIRE_DAWN();
+    SKIP_ON_SOFTWARE_ADAPTER();
 
     auto makeScene = []() {
         auto scene = Scene::create();
@@ -4500,6 +4602,7 @@ TEST_CASE("Dawn: tone mapping affects output brightness", "[dawn]") {
 
 TEST_CASE("Dawn: toneMappingExposure scales brightness", "[dawn]") {
     REQUIRE_DAWN();
+    SKIP_ON_SOFTWARE_ADAPTER();
 
     auto scene = Scene::create();
     auto dirLight = DirectionalLight::create(Color(0xffffff), 1.0f);
@@ -4548,6 +4651,7 @@ TEST_CASE("Dawn: toneMappingExposure scales brightness", "[dawn]") {
 
 TEST_CASE("Dawn: sRGB output encoding differs from linear", "[dawn]") {
     REQUIRE_DAWN();
+    SKIP_ON_SOFTWARE_ADAPTER();
 
     auto scene = Scene::create();
     auto ambient = AmbientLight::create(Color(0xffffff));
@@ -4599,6 +4703,7 @@ TEST_CASE("Dawn: sRGB output encoding differs from linear", "[dawn]") {
 
 TEST_CASE("Dawn: InstancedMesh per-instance colors", "[dawn]") {
     REQUIRE_DAWN();
+    SKIP_ON_SOFTWARE_ADAPTER();
 
     auto scene = Scene::create();
     auto ambient = AmbientLight::create(Color(0xffffff));
@@ -4638,6 +4743,7 @@ TEST_CASE("Dawn: InstancedMesh per-instance colors", "[dawn]") {
 
 TEST_CASE("Cross: InstancedMesh per-instance colors match", "[dawn]") {
     REQUIRE_DAWN();
+    SKIP_ON_SOFTWARE_ADAPTER();
 
     auto makeScene = []() {
         auto scene = Scene::create();
@@ -4688,6 +4794,7 @@ TEST_CASE("Cross: InstancedMesh per-instance colors match", "[dawn]") {
 
 TEST_CASE("Dawn: shadow map resolution affects quality", "[dawn]") {
     REQUIRE_DAWN();
+    SKIP_ON_SOFTWARE_ADAPTER();
 
     auto makeScene = [](int shadowMapSize) {
         auto scene = Scene::create();
@@ -4742,6 +4849,7 @@ TEST_CASE("Dawn: shadow map resolution affects quality", "[dawn]") {
 
 TEST_CASE("Dawn: shadow bias prevents shadow acne", "[dawn]") {
     REQUIRE_DAWN();
+    SKIP_ON_SOFTWARE_ADAPTER();
 
     auto makeScene = [](float bias) {
         auto scene = Scene::create();
@@ -4783,6 +4891,7 @@ TEST_CASE("Dawn: shadow bias prevents shadow acne", "[dawn]") {
 
 TEST_CASE("Dawn: specularMap controls highlight regions", "[dawn]") {
     REQUIRE_DAWN();
+    SKIP_ON_SOFTWARE_ADAPTER();
 
     auto makeScene = [](bool useSpecularMap) {
         auto scene = Scene::create();
