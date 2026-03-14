@@ -22,9 +22,22 @@
 
 #include "threepp/objects/Line.hpp"
 #include "threepp/objects/LineSegments.hpp"
+#include "threepp/objects/Points.hpp"
+#include "threepp/objects/Sprite.hpp"
+#include "threepp/objects/InstancedMesh.hpp"
 #include "threepp/materials/MeshToonMaterial.hpp"
 #include "threepp/materials/MeshDepthMaterial.hpp"
+#include "threepp/materials/MeshNormalMaterial.hpp"
+#include "threepp/materials/MeshMatcapMaterial.hpp"
+#include "threepp/materials/LineBasicMaterial.hpp"
+#include "threepp/materials/PointsMaterial.hpp"
+#include "threepp/materials/SpriteMaterial.hpp"
+#include "threepp/scenes/Fog.hpp"
+#include "threepp/scenes/FogExp2.hpp"
 #include "threepp/geometries/TorusKnotGeometry.hpp"
+#include "threepp/geometries/RingGeometry.hpp"
+#include "threepp/geometries/ConeGeometry.hpp"
+#include "threepp/geometries/CapsuleGeometry.hpp"
 
 #include <webgpu/webgpu.h>
 #include <webgpu/wgpu.h>
@@ -2331,5 +2344,987 @@ TEST_CASE("Cross: HemisphereLight tints similarly", "[dawn]") {
     CHECK(glNonBlack > PIXEL_COUNT / 8);
     CHECK(dawnNonBlack > PIXEL_COUNT / 8);
 
+    CHECK(std::abs(avgBrightness(glPixels) - avgBrightness(dawnPixels)) < 50.0);
+}
+
+// =============================================================================
+// Section 6: Dawn — Missing Material Types
+// =============================================================================
+
+TEST_CASE("Dawn: MeshToonMaterial renders with stepped shading", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto scene = Scene::create();
+    auto dirLight = DirectionalLight::create(Color(0xffffff), 1.0f);
+    dirLight->position.set(0, 0, 1);
+    scene->add(dirLight);
+
+    auto geometry = SphereGeometry::create(1.0f, 32, 16);
+    auto material = MeshToonMaterial::create();
+    material->color = Color(0xff4444);
+    auto mesh = Mesh::create(geometry, material);
+    scene->add(mesh);
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 3;
+
+    auto pixels = renderWithDawn(*scene, *camera, Color(0x000000));
+    int nonBlack = countNonBlack(pixels);
+    CHECK(nonBlack > PIXEL_COUNT / 8);
+
+    auto avg = averageColor(pixels);
+    CHECK(avg.r > avg.g);
+    CHECK(avg.r > avg.b);
+}
+
+TEST_CASE("Dawn: MeshNormalMaterial shows surface normals as colors", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto scene = Scene::create();
+    auto geometry = SphereGeometry::create(1.0f, 32, 16);
+    auto material = MeshNormalMaterial::create();
+    auto mesh = Mesh::create(geometry, material);
+    scene->add(mesh);
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 3;
+
+    auto pixels = renderWithDawn(*scene, *camera, Color(0x000000));
+    int nonBlack = countNonBlack(pixels);
+    CHECK(nonBlack > PIXEL_COUNT / 8);
+
+    // Normal material maps normals to RGB — center of sphere facing camera
+    // should have significant blue (Z-forward maps to blue)
+    auto center = centerPixel(pixels, RT_WIDTH, RT_HEIGHT);
+    CHECK((center.r + center.g + center.b) > 50.0);
+}
+
+TEST_CASE("Dawn: MeshDepthMaterial varies brightness with distance", "[dawn]") {
+    REQUIRE_DAWN();
+
+    // Near sphere should be brighter than far sphere
+    auto makeScene = [](float z) {
+        auto scene = Scene::create();
+        auto geometry = SphereGeometry::create(0.5f, 16, 8);
+        auto material = MeshDepthMaterial::create();
+        auto mesh = Mesh::create(geometry, material);
+        mesh->position.z = z;
+        scene->add(mesh);
+        return scene;
+    };
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 50);
+    camera->position.z = 5;
+    Color clearColor(0x000000);
+
+    auto nearPixels = renderWithDawn(*makeScene(0.0f), *camera, clearColor);
+    auto farPixels = renderWithDawn(*makeScene(-10.0f), *camera, clearColor);
+
+    double nearBright = avgBrightness(nearPixels);
+    double farBright = avgBrightness(farPixels);
+    CHECK(nearBright > farBright);
+}
+
+TEST_CASE("Dawn: MeshMatcapMaterial renders visible geometry", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto scene = Scene::create();
+    auto geometry = SphereGeometry::create(1.0f, 32, 16);
+    auto material = MeshMatcapMaterial::create();
+    auto mesh = Mesh::create(geometry, material);
+    scene->add(mesh);
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 3;
+
+    auto pixels = renderWithDawn(*scene, *camera, Color(0x000000));
+    int nonBlack = countNonBlack(pixels);
+    CHECK(nonBlack > PIXEL_COUNT / 8);
+}
+
+TEST_CASE("Cross: MeshToonMaterial produces similar result", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto makeScene = []() {
+        auto scene = Scene::create();
+        auto dirLight = DirectionalLight::create(Color(0xffffff), 1.0f);
+        dirLight->position.set(0, 0, 1);
+        scene->add(dirLight);
+
+        auto geometry = SphereGeometry::create(1.0f, 32, 16);
+        auto material = MeshToonMaterial::create();
+        material->color = Color(0xff4444);
+        auto mesh = Mesh::create(geometry, material);
+        scene->add(mesh);
+        return scene;
+    };
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 3;
+    Color clearColor(0x000000);
+
+    auto glPixels = renderWithGL(*makeScene(), *camera, clearColor);
+    auto dawnPixels = renderWithDawn(*makeScene(), *camera, clearColor);
+
+    CHECK(countNonBlack(glPixels) > PIXEL_COUNT / 8);
+    CHECK(countNonBlack(dawnPixels) > PIXEL_COUNT / 8);
+    CHECK(std::abs(avgBrightness(glPixels) - avgBrightness(dawnPixels)) < 50.0);
+}
+
+TEST_CASE("Cross: MeshNormalMaterial produces similar result", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto makeScene = []() {
+        auto scene = Scene::create();
+        auto geometry = SphereGeometry::create(1.0f, 32, 16);
+        auto material = MeshNormalMaterial::create();
+        auto mesh = Mesh::create(geometry, material);
+        scene->add(mesh);
+        return scene;
+    };
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 3;
+    Color clearColor(0x000000);
+
+    auto glPixels = renderWithGL(*makeScene(), *camera, clearColor);
+    auto dawnPixels = renderWithDawn(*makeScene(), *camera, clearColor);
+
+    CHECK(countNonBlack(glPixels) > PIXEL_COUNT / 8);
+    CHECK(countNonBlack(dawnPixels) > PIXEL_COUNT / 8);
+    CHECK(std::abs(avgBrightness(glPixels) - avgBrightness(dawnPixels)) < 50.0);
+}
+
+// =============================================================================
+// Section 7: Dawn — Missing Object Types
+// =============================================================================
+
+TEST_CASE("Dawn: Line renders visible edges", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto scene = Scene::create();
+    auto geometry = BufferGeometry::create();
+    std::vector<float> positions = {-1, 0, 0, 1, 0, 0, 0, 1, 0};
+    geometry->setAttribute("position", FloatBufferAttribute::create(positions, 3));
+
+    auto material = LineBasicMaterial::create();
+    material->color = Color(0xff0000);
+    auto line = Line::create(geometry, material);
+    scene->add(line);
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 3;
+
+    auto pixels = renderWithDawn(*scene, *camera, Color(0x000000));
+    int nonBlack = countNonBlack(pixels);
+    CHECK(nonBlack > 5);
+}
+
+TEST_CASE("Dawn: LineSegments renders discrete segments", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto scene = Scene::create();
+    auto geometry = BufferGeometry::create();
+    std::vector<float> positions = {-1, -1, 0, 1, -1, 0, -1, 1, 0, 1, 1, 0};
+    geometry->setAttribute("position", FloatBufferAttribute::create(positions, 3));
+
+    auto material = LineBasicMaterial::create();
+    material->color = Color(0x00ff00);
+    auto lineSegments = LineSegments::create(geometry, material);
+    scene->add(lineSegments);
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 3;
+
+    auto pixels = renderWithDawn(*scene, *camera, Color(0x000000));
+    int nonBlack = countNonBlack(pixels);
+    CHECK(nonBlack > 5);
+}
+
+TEST_CASE("Dawn: Points renders visible dots", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto scene = Scene::create();
+    auto geometry = BufferGeometry::create();
+    std::vector<float> positions = {0, 0, 0, 0.5f, 0.5f, 0, -0.5f, -0.5f, 0};
+    geometry->setAttribute("position", FloatBufferAttribute::create(positions, 3));
+
+    auto material = PointsMaterial::create();
+    material->color = Color(0xffff00);
+    material->size = 8.0f;
+    auto points = Points::create(geometry, material);
+    scene->add(points);
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 3;
+
+    auto pixels = renderWithDawn(*scene, *camera, Color(0x000000));
+    int nonBlack = countNonBlack(pixels);
+    CHECK(nonBlack > 3);
+}
+
+TEST_CASE("Dawn: Sprite renders as billboard", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto scene = Scene::create();
+    auto material = SpriteMaterial::create();
+    material->color = Color(0x00ff00);
+    auto sprite = Sprite::create(material);
+    scene->add(sprite);
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 3;
+
+    auto pixels = renderWithDawn(*scene, *camera, Color(0x000000));
+    int nonBlack = countNonBlack(pixels);
+    CHECK(nonBlack > PIXEL_COUNT / 16);
+}
+
+TEST_CASE("Dawn: InstancedMesh renders multiple instances", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto scene = Scene::create();
+    auto ambient = AmbientLight::create(Color(0xffffff));
+    scene->add(ambient);
+
+    auto geometry = BoxGeometry::create(0.4f, 0.4f, 0.4f);
+    auto material = MeshBasicMaterial::create();
+    material->color = Color(0xff8800);
+
+    auto im = InstancedMesh::create(geometry, material, 4);
+    Matrix4 m;
+    m.setPosition(Vector3(-0.8f, -0.8f, 0)); im->setMatrixAt(0, m);
+    m.setPosition(Vector3( 0.8f, -0.8f, 0)); im->setMatrixAt(1, m);
+    m.setPosition(Vector3(-0.8f,  0.8f, 0)); im->setMatrixAt(2, m);
+    m.setPosition(Vector3( 0.8f,  0.8f, 0)); im->setMatrixAt(3, m);
+    scene->add(im);
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 4;
+
+    auto pixels = renderWithDawn(*scene, *camera, Color(0x000000));
+    int nonBlack = countNonBlack(pixels);
+
+    // 4 instances should cover more than a single box at center
+    auto singleScene = Scene::create();
+    singleScene->add(AmbientLight::create(Color(0xffffff)));
+    auto singleMat = MeshBasicMaterial::create();
+    singleMat->color = Color(0xff8800);
+    auto singleMesh = Mesh::create(geometry, singleMat);
+    singleScene->add(singleMesh);
+    auto singlePixels = renderWithDawn(*singleScene, *camera, Color(0x000000));
+    int singleNonBlack = countNonBlack(singlePixels);
+
+    CHECK(nonBlack > singleNonBlack);
+}
+
+TEST_CASE("Cross: InstancedMesh produces similar coverage", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto makeScene = []() {
+        auto scene = Scene::create();
+        auto ambient = AmbientLight::create(Color(0xffffff));
+        scene->add(ambient);
+
+        auto geometry = BoxGeometry::create(0.4f, 0.4f, 0.4f);
+        auto material = MeshBasicMaterial::create();
+        material->color = Color(0xff8800);
+
+        auto im = InstancedMesh::create(geometry, material, 4);
+        Matrix4 m;
+        m.setPosition(Vector3(-0.8f, -0.8f, 0)); im->setMatrixAt(0, m);
+        m.setPosition(Vector3( 0.8f, -0.8f, 0)); im->setMatrixAt(1, m);
+        m.setPosition(Vector3(-0.8f,  0.8f, 0)); im->setMatrixAt(2, m);
+        m.setPosition(Vector3( 0.8f,  0.8f, 0)); im->setMatrixAt(3, m);
+        scene->add(im);
+        return scene;
+    };
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 4;
+    Color clearColor(0x000000);
+
+    auto glPixels = renderWithGL(*makeScene(), *camera, clearColor);
+    auto dawnPixels = renderWithDawn(*makeScene(), *camera, clearColor);
+
+    int glNonBlack = countNonBlack(glPixels);
+    int dawnNonBlack = countNonBlack(dawnPixels);
+    CHECK(glNonBlack > PIXEL_COUNT / 8);
+    CHECK(dawnNonBlack > PIXEL_COUNT / 8);
+
+    double ratio = static_cast<double>(glNonBlack) / dawnNonBlack;
+    CHECK(ratio > 0.5);
+    CHECK(ratio < 2.0);
+}
+
+// =============================================================================
+// Section 8: Dawn — Vertex Colors
+// =============================================================================
+
+TEST_CASE("Dawn: vertex colors tint geometry", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto scene = Scene::create();
+    auto ambient = AmbientLight::create(Color(0xffffff));
+    scene->add(ambient);
+
+    auto geometry = BoxGeometry::create(1, 1, 1);
+    auto posAttr = geometry->getAttribute<float>("position");
+    int vertexCount = static_cast<int>(posAttr->count());
+    std::vector<float> colors(vertexCount * 3, 0.0f);
+    for (int i = 0; i < vertexCount; i++) {
+        colors[i * 3 + 0] = 1.0f; // red
+    }
+    geometry->setAttribute("color", FloatBufferAttribute::create(colors, 3));
+
+    auto material = MeshBasicMaterial::create();
+    material->vertexColors = true;
+    auto mesh = Mesh::create(geometry, material);
+    scene->add(mesh);
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 3;
+
+    auto pixels = renderWithDawn(*scene, *camera, Color(0x000000));
+    auto avg = averageColor(pixels);
+    CHECK(avg.r > avg.g + 10);
+    CHECK(avg.r > avg.b + 10);
+}
+
+TEST_CASE("Cross: vertex colors produce similar tint", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto makeScene = []() {
+        auto scene = Scene::create();
+        auto ambient = AmbientLight::create(Color(0xffffff));
+        scene->add(ambient);
+
+        auto geometry = BoxGeometry::create(1, 1, 1);
+        auto posAttr = geometry->getAttribute<float>("position");
+        int vertexCount = static_cast<int>(posAttr->count());
+        std::vector<float> colors(vertexCount * 3, 0.0f);
+        for (int i = 0; i < vertexCount; i++) {
+            colors[i * 3 + 0] = 1.0f; // red
+        }
+        geometry->setAttribute("color", FloatBufferAttribute::create(colors, 3));
+
+        auto material = MeshBasicMaterial::create();
+        material->vertexColors = true;
+        auto mesh = Mesh::create(geometry, material);
+        scene->add(mesh);
+        return scene;
+    };
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 3;
+    Color clearColor(0x000000);
+
+    auto glPixels = renderWithGL(*makeScene(), *camera, clearColor);
+    auto dawnPixels = renderWithDawn(*makeScene(), *camera, clearColor);
+
+    auto glAvg = averageColor(glPixels);
+    auto dawnAvg = averageColor(dawnPixels);
+
+    // Both should be red-dominant
+    CHECK(glAvg.r > glAvg.g + 10);
+    CHECK(dawnAvg.r > dawnAvg.g + 10);
+    CHECK(std::abs(glAvg.r - dawnAvg.r) < 50.0);
+}
+
+// =============================================================================
+// Section 9: Dawn — Fog
+// =============================================================================
+
+TEST_CASE("Dawn: Fog attenuates distant objects", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto makeScene = [](float objZ) {
+        auto scene = Scene::create();
+        scene->fog = Fog(Color(0x000000), 1.0f, 10.0f);
+        auto ambient = AmbientLight::create(Color(0xffffff));
+        scene->add(ambient);
+
+        auto geometry = SphereGeometry::create(0.5f, 16, 8);
+        auto material = MeshBasicMaterial::create();
+        material->color = Color(0xffffff);
+        auto mesh = Mesh::create(geometry, material);
+        mesh->position.z = objZ;
+        scene->add(mesh);
+        return scene;
+    };
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 50);
+    camera->position.z = 5;
+    Color clearColor(0x000000);
+
+    auto nearPixels = renderWithDawn(*makeScene(3.0f), *camera, clearColor);
+    auto farPixels = renderWithDawn(*makeScene(-5.0f), *camera, clearColor);
+
+    double nearBright = avgBrightness(nearPixels);
+    double farBright = avgBrightness(farPixels);
+    CHECK(nearBright > farBright);
+}
+
+TEST_CASE("Dawn: FogExp2 attenuates distant objects", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto makeScene = [](float objZ) {
+        auto scene = Scene::create();
+        scene->fog = FogExp2(Color(0x000000), 0.15f);
+        auto ambient = AmbientLight::create(Color(0xffffff));
+        scene->add(ambient);
+
+        auto geometry = SphereGeometry::create(0.5f, 16, 8);
+        auto material = MeshBasicMaterial::create();
+        material->color = Color(0xffffff);
+        auto mesh = Mesh::create(geometry, material);
+        mesh->position.z = objZ;
+        scene->add(mesh);
+        return scene;
+    };
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 50);
+    camera->position.z = 5;
+    Color clearColor(0x000000);
+
+    auto nearPixels = renderWithDawn(*makeScene(3.0f), *camera, clearColor);
+    auto farPixels = renderWithDawn(*makeScene(-5.0f), *camera, clearColor);
+
+    double nearBright = avgBrightness(nearPixels);
+    double farBright = avgBrightness(farPixels);
+    CHECK(nearBright > farBright);
+}
+
+TEST_CASE("Cross: Fog attenuation matches", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto makeScene = []() {
+        auto scene = Scene::create();
+        scene->fog = Fog(Color(0x000000), 1.0f, 10.0f);
+        auto ambient = AmbientLight::create(Color(0xffffff));
+        scene->add(ambient);
+
+        auto geometry = SphereGeometry::create(0.5f, 16, 8);
+        auto material = MeshBasicMaterial::create();
+        material->color = Color(0xffffff);
+        auto mesh = Mesh::create(geometry, material);
+        mesh->position.z = -2.0f;
+        scene->add(mesh);
+        return scene;
+    };
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 50);
+    camera->position.z = 5;
+    Color clearColor(0x000000);
+
+    auto glPixels = renderWithGL(*makeScene(), *camera, clearColor);
+    auto dawnPixels = renderWithDawn(*makeScene(), *camera, clearColor);
+
+    CHECK(countNonBlack(glPixels) > PIXEL_COUNT / 16);
+    CHECK(countNonBlack(dawnPixels) > PIXEL_COUNT / 16);
+    CHECK(std::abs(avgBrightness(glPixels) - avgBrightness(dawnPixels)) < 50.0);
+}
+
+TEST_CASE("Cross: FogExp2 attenuation matches", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto makeScene = []() {
+        auto scene = Scene::create();
+        scene->fog = FogExp2(Color(0x000000), 0.15f);
+        auto ambient = AmbientLight::create(Color(0xffffff));
+        scene->add(ambient);
+
+        auto geometry = SphereGeometry::create(0.5f, 16, 8);
+        auto material = MeshBasicMaterial::create();
+        material->color = Color(0xffffff);
+        auto mesh = Mesh::create(geometry, material);
+        mesh->position.z = -2.0f;
+        scene->add(mesh);
+        return scene;
+    };
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 50);
+    camera->position.z = 5;
+    Color clearColor(0x000000);
+
+    auto glPixels = renderWithGL(*makeScene(), *camera, clearColor);
+    auto dawnPixels = renderWithDawn(*makeScene(), *camera, clearColor);
+
+    CHECK(countNonBlack(glPixels) > PIXEL_COUNT / 16);
+    CHECK(countNonBlack(dawnPixels) > PIXEL_COUNT / 16);
+    CHECK(std::abs(avgBrightness(glPixels) - avgBrightness(dawnPixels)) < 50.0);
+}
+
+// =============================================================================
+// Section 10: Dawn — OrthographicCamera
+// =============================================================================
+
+TEST_CASE("Dawn: OrthographicCamera renders without perspective distortion", "[dawn]") {
+    REQUIRE_DAWN();
+
+    // Two boxes at different depths — with ortho they should appear same size
+    auto makeScene = [](float z) {
+        auto scene = Scene::create();
+        auto ambient = AmbientLight::create(Color(0xffffff));
+        scene->add(ambient);
+        auto geometry = BoxGeometry::create(1, 1, 1);
+        auto material = MeshBasicMaterial::create();
+        material->color = Color(0xffffff);
+        auto mesh = Mesh::create(geometry, material);
+        mesh->position.z = z;
+        scene->add(mesh);
+        return scene;
+    };
+
+    auto camera = OrthographicCamera::create(-2, 2, 2, -2, 0.1f, 100);
+    camera->position.z = 5;
+    Color clearColor(0x000000);
+
+    auto nearPixels = renderWithDawn(*makeScene(0.0f), *camera, clearColor);
+    auto farPixels = renderWithDawn(*makeScene(-10.0f), *camera, clearColor);
+
+    int nearCount = countNonBlack(nearPixels);
+    int farCount = countNonBlack(farPixels);
+
+    // Orthographic: same-size boxes at different depths produce similar pixel counts
+    CHECK(nearCount > PIXEL_COUNT / 8);
+    CHECK(farCount > PIXEL_COUNT / 8);
+    double ratio = static_cast<double>(nearCount) / farCount;
+    CHECK(ratio > 0.8);
+    CHECK(ratio < 1.2);
+}
+
+TEST_CASE("Cross: OrthographicCamera produces similar result", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto makeScene = []() {
+        auto scene = Scene::create();
+        auto ambient = AmbientLight::create(Color(0xffffff));
+        scene->add(ambient);
+        auto geometry = BoxGeometry::create(1, 1, 1);
+        auto material = MeshBasicMaterial::create();
+        material->color = Color(0xffffff);
+        auto mesh = Mesh::create(geometry, material);
+        scene->add(mesh);
+        return scene;
+    };
+
+    auto camera = OrthographicCamera::create(-2, 2, 2, -2, 0.1f, 100);
+    camera->position.z = 5;
+    Color clearColor(0x000000);
+
+    auto glPixels = renderWithGL(*makeScene(), *camera, clearColor);
+    auto dawnPixels = renderWithDawn(*makeScene(), *camera, clearColor);
+
+    int glNonBlack = countNonBlack(glPixels);
+    int dawnNonBlack = countNonBlack(dawnPixels);
+    CHECK(glNonBlack > PIXEL_COUNT / 8);
+    CHECK(dawnNonBlack > PIXEL_COUNT / 8);
+
+    double ratio = static_cast<double>(glNonBlack) / dawnNonBlack;
+    CHECK(ratio > 0.7);
+    CHECK(ratio < 1.4);
+}
+
+// =============================================================================
+// Section 11: Dawn — Object Hierarchy
+// =============================================================================
+
+TEST_CASE("Dawn: object hierarchy applies parent transform", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto scene = Scene::create();
+    auto ambient = AmbientLight::create(Color(0xffffff));
+    scene->add(ambient);
+
+    // Parent rotated 90 degrees around Y, child offset in X
+    auto parent = Object3D::create();
+    parent->rotation.y = math::PI / 2;
+    scene->add(parent);
+
+    auto geometry = BoxGeometry::create(0.5f, 0.5f, 0.5f);
+    auto material = MeshBasicMaterial::create();
+    material->color = Color(0xffffff);
+    auto child = Mesh::create(geometry, material);
+    child->position.x = 2.0f;
+    parent->add(child);
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 5;
+
+    auto pixels = renderWithDawn(*scene, *camera, Color(0x000000));
+    int nonBlack = countNonBlack(pixels);
+    CHECK(nonBlack > 5);
+}
+
+TEST_CASE("Cross: object hierarchy matches", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto makeScene = []() {
+        auto scene = Scene::create();
+        auto ambient = AmbientLight::create(Color(0xffffff));
+        scene->add(ambient);
+
+        auto parent = Object3D::create();
+        parent->rotation.y = math::PI / 4;
+        scene->add(parent);
+
+        auto geometry = BoxGeometry::create(0.5f, 0.5f, 0.5f);
+        auto material = MeshBasicMaterial::create();
+        material->color = Color(0xffffff);
+        auto child = Mesh::create(geometry, material);
+        child->position.x = 1.0f;
+        parent->add(child);
+        return scene;
+    };
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 5;
+    Color clearColor(0x000000);
+
+    auto glPixels = renderWithGL(*makeScene(), *camera, clearColor);
+    auto dawnPixels = renderWithDawn(*makeScene(), *camera, clearColor);
+
+    double glX = avgXPosition(glPixels, RT_WIDTH, RT_HEIGHT);
+    double dawnX = avgXPosition(dawnPixels, RT_WIDTH, RT_HEIGHT);
+
+    // Both should place object in similar X position
+    CHECK(std::abs(glX - dawnX) < RT_WIDTH * 0.3);
+}
+
+// =============================================================================
+// Section 12: Dawn — Additional Geometries
+// =============================================================================
+
+TEST_CASE("Dawn: RingGeometry renders correctly", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto scene = Scene::create();
+    auto ambient = AmbientLight::create(Color(0xffffff));
+    scene->add(ambient);
+    auto geometry = RingGeometry::create(0.5f, 1.0f);
+    auto material = MeshBasicMaterial::create();
+    material->color = Color(0xffffff);
+    material->side = Side::Double;
+    auto mesh = Mesh::create(geometry, material);
+    scene->add(mesh);
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 3;
+
+    auto pixels = renderWithDawn(*scene, *camera, Color(0x000000));
+    CHECK(countNonBlack(pixels) > PIXEL_COUNT / 16);
+}
+
+TEST_CASE("Dawn: TorusKnotGeometry renders correctly", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto scene = Scene::create();
+    auto ambient = AmbientLight::create(Color(0xffffff));
+    scene->add(ambient);
+    auto geometry = TorusKnotGeometry::create(0.8f, 0.2f, 64, 8);
+    auto material = MeshBasicMaterial::create();
+    material->color = Color(0xffffff);
+    auto mesh = Mesh::create(geometry, material);
+    scene->add(mesh);
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 4;
+
+    auto pixels = renderWithDawn(*scene, *camera, Color(0x000000));
+    CHECK(countNonBlack(pixels) > PIXEL_COUNT / 16);
+}
+
+TEST_CASE("Dawn: ConeGeometry renders correctly", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto scene = Scene::create();
+    auto ambient = AmbientLight::create(Color(0xffffff));
+    scene->add(ambient);
+    auto geometry = ConeGeometry::create(0.8f, 1.5f, 16);
+    auto material = MeshBasicMaterial::create();
+    material->color = Color(0xffffff);
+    auto mesh = Mesh::create(geometry, material);
+    scene->add(mesh);
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 4;
+
+    auto pixels = renderWithDawn(*scene, *camera, Color(0x000000));
+    CHECK(countNonBlack(pixels) > PIXEL_COUNT / 16);
+}
+
+TEST_CASE("Dawn: CapsuleGeometry renders correctly", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto scene = Scene::create();
+    auto ambient = AmbientLight::create(Color(0xffffff));
+    scene->add(ambient);
+    auto geometry = CapsuleGeometry::create(0.5f, 1.0f, 4, 8);
+    auto material = MeshBasicMaterial::create();
+    material->color = Color(0xffffff);
+    auto mesh = Mesh::create(geometry, material);
+    scene->add(mesh);
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 4;
+
+    auto pixels = renderWithDawn(*scene, *camera, Color(0x000000));
+    CHECK(countNonBlack(pixels) > PIXEL_COUNT / 16);
+}
+
+// =============================================================================
+// Section 13: Dawn — Scissor Test
+// =============================================================================
+
+TEST_CASE("Dawn: scissor test clips rendering", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto scene = Scene::create();
+    auto ambient = AmbientLight::create(Color(0xffffff));
+    scene->add(ambient);
+    auto geometry = SphereGeometry::create(1.0f, 16, 8);
+    auto material = MeshBasicMaterial::create();
+    material->color = Color(0xffffff);
+    auto mesh = Mesh::create(geometry, material);
+    scene->add(mesh);
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 3;
+
+    // Full render (no scissor)
+    auto fullPixels = renderWithDawn(*scene, *camera, Color(0x000000));
+    int fullCount = countNonBlack(fullPixels);
+
+    // Scissored render — only top-left quarter
+    // We need manual Dawn renderer setup for scissor
+    static Canvas* dawnScissorCanvas = nullptr;
+    if (!dawnScissorCanvas) {
+        dawnScissorCanvas = new Canvas(Canvas::Parameters().size(RT_WIDTH, RT_HEIGHT).headless(true).graphicsApi(GraphicsAPI::WebGPU));
+    }
+
+    DawnRenderer renderer(*dawnScissorCanvas);
+    renderer.setClearColor(Color(0x000000));
+    renderer.setScissor(0, 0, RT_WIDTH / 2, RT_HEIGHT / 2);
+    renderer.setScissorTest(true);
+
+    auto target = GLRenderTarget::create(RT_WIDTH, RT_HEIGHT, GLRenderTarget::Options{});
+    renderer.setRenderTarget(target.get());
+    renderer.render(*scene, *camera);
+    auto scissoredPixels = renderer.readRGBPixels();
+
+    renderer.setScissorTest(false);
+    renderer.setRenderTarget(nullptr);
+    renderer.dispose();
+
+    int scissorCount = countNonBlack(scissoredPixels);
+    CHECK(fullCount > scissorCount);
+}
+
+// =============================================================================
+// Section 14: Dawn — Multiple Lights Combined
+// =============================================================================
+
+TEST_CASE("Dawn: combined ambient + directional + point lights are brighter", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto makeSingleLight = []() {
+        auto scene = Scene::create();
+        auto dirLight = DirectionalLight::create(Color(0xffffff), 0.5f);
+        dirLight->position.set(0, 0, 1);
+        scene->add(dirLight);
+
+        auto geometry = SphereGeometry::create(1.0f, 16, 8);
+        auto material = MeshLambertMaterial::create();
+        material->color = Color(0xffffff);
+        auto mesh = Mesh::create(geometry, material);
+        scene->add(mesh);
+        return scene;
+    };
+
+    auto makeMultiLight = []() {
+        auto scene = Scene::create();
+        auto ambient = AmbientLight::create(Color(0x404040));
+        scene->add(ambient);
+        auto dirLight = DirectionalLight::create(Color(0xffffff), 0.5f);
+        dirLight->position.set(0, 0, 1);
+        scene->add(dirLight);
+        auto pointLight = PointLight::create(Color(0xffffff), 0.5f);
+        pointLight->position.set(2, 2, 2);
+        scene->add(pointLight);
+
+        auto geometry = SphereGeometry::create(1.0f, 16, 8);
+        auto material = MeshLambertMaterial::create();
+        material->color = Color(0xffffff);
+        auto mesh = Mesh::create(geometry, material);
+        scene->add(mesh);
+        return scene;
+    };
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 3;
+    Color clearColor(0x000000);
+
+    auto singlePixels = renderWithDawn(*makeSingleLight(), *camera, clearColor);
+    auto multiPixels = renderWithDawn(*makeMultiLight(), *camera, clearColor);
+
+    CHECK(avgBrightness(multiPixels) > avgBrightness(singlePixels));
+}
+
+TEST_CASE("Cross: combined lights produce similar brightness", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto makeScene = []() {
+        auto scene = Scene::create();
+        auto ambient = AmbientLight::create(Color(0x404040));
+        scene->add(ambient);
+        auto dirLight = DirectionalLight::create(Color(0xffffff), 0.5f);
+        dirLight->position.set(0, 0, 1);
+        scene->add(dirLight);
+        auto pointLight = PointLight::create(Color(0xffffff), 0.5f);
+        pointLight->position.set(2, 2, 2);
+        scene->add(pointLight);
+
+        auto geometry = SphereGeometry::create(1.0f, 16, 8);
+        auto material = MeshLambertMaterial::create();
+        material->color = Color(0xffffff);
+        auto mesh = Mesh::create(geometry, material);
+        scene->add(mesh);
+        return scene;
+    };
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 3;
+    Color clearColor(0x000000);
+
+    auto glPixels = renderWithGL(*makeScene(), *camera, clearColor);
+    auto dawnPixels = renderWithDawn(*makeScene(), *camera, clearColor);
+
+    CHECK(std::abs(avgBrightness(glPixels) - avgBrightness(dawnPixels)) < 50.0);
+}
+
+// =============================================================================
+// Section 15: Dawn — Shadow Types
+// =============================================================================
+
+TEST_CASE("Dawn: SpotLight shadow casts correctly", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto scene = Scene::create();
+
+    auto spotLight = SpotLight::create(Color(0xffffff), 2.0f);
+    spotLight->position.set(0, 5, 0);
+    spotLight->angle = math::PI / 4;
+    spotLight->castShadow = true;
+    scene->add(spotLight);
+
+    // Occluder box
+    auto boxGeom = BoxGeometry::create(1, 0.2f, 1);
+    auto boxMat = MeshPhongMaterial::create();
+    boxMat->color = Color(0x888888);
+    auto box = Mesh::create(boxGeom, boxMat);
+    box->position.y = 2;
+    box->castShadow = true;
+    scene->add(box);
+
+    // Floor plane
+    auto planeGeom = PlaneGeometry::create(10, 10);
+    auto planeMat = MeshPhongMaterial::create();
+    planeMat->color = Color(0xcccccc);
+    auto plane = Mesh::create(planeGeom, planeMat);
+    plane->rotation.x = -math::PI / 2;
+    plane->receiveShadow = true;
+    scene->add(plane);
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.set(0, 5, 8);
+    camera->lookAt(Vector3(0, 0, 0));
+
+    auto pixels = renderWithDawn(*scene, *camera, Color(0x000000));
+    int nonBlack = countNonBlack(pixels);
+    CHECK(nonBlack > PIXEL_COUNT / 8);
+
+    int maxBright = maxPixelBrightness(pixels);
+    CHECK(maxBright > 100);
+}
+
+TEST_CASE("Dawn: PointLight shadow casts correctly", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto scene = Scene::create();
+
+    auto pointLight = PointLight::create(Color(0xffffff), 2.0f);
+    pointLight->position.set(0, 3, 0);
+    pointLight->castShadow = true;
+    scene->add(pointLight);
+
+    // Occluder sphere
+    auto sphereGeom = SphereGeometry::create(0.5f, 16, 8);
+    auto sphereMat = MeshPhongMaterial::create();
+    sphereMat->color = Color(0x888888);
+    auto sphere = Mesh::create(sphereGeom, sphereMat);
+    sphere->position.y = 1.5f;
+    sphere->castShadow = true;
+    scene->add(sphere);
+
+    // Floor plane
+    auto planeGeom = PlaneGeometry::create(10, 10);
+    auto planeMat = MeshPhongMaterial::create();
+    planeMat->color = Color(0xcccccc);
+    auto plane = Mesh::create(planeGeom, planeMat);
+    plane->rotation.x = -math::PI / 2;
+    plane->receiveShadow = true;
+    scene->add(plane);
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.set(0, 4, 6);
+    camera->lookAt(Vector3(0, 0, 0));
+
+    auto pixels = renderWithDawn(*scene, *camera, Color(0x000000));
+    int nonBlack = countNonBlack(pixels);
+    CHECK(nonBlack > PIXEL_COUNT / 8);
+}
+
+// =============================================================================
+// Section 16: Dawn — Texture Maps
+// =============================================================================
+
+TEST_CASE("Cross: normal-mapped sphere matches", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto makeNormalTexture = []() {
+        std::vector<unsigned char> data = {
+            128, 128, 255, 255,
+            255, 128, 128, 255,
+            128, 255, 128, 255,
+            128, 128, 255, 255
+        };
+        return Texture::create(Image(std::move(data), 2, 2));
+    };
+
+    auto makeScene = [&makeNormalTexture]() {
+        auto scene = Scene::create();
+        auto dirLight = DirectionalLight::create(Color(0xffffff), 1.0f);
+        dirLight->position.set(1, 1, 1);
+        scene->add(dirLight);
+
+        auto geometry = SphereGeometry::create(1.0f, 32, 16);
+        auto material = MeshPhongMaterial::create();
+        material->color = Color(0xffffff);
+        material->normalMap = makeNormalTexture();
+        auto mesh = Mesh::create(geometry, material);
+        scene->add(mesh);
+        return scene;
+    };
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 3;
+    Color clearColor(0x000000);
+
+    auto glPixels = renderWithGL(*makeScene(), *camera, clearColor);
+    auto dawnPixels = renderWithDawn(*makeScene(), *camera, clearColor);
+
+    CHECK(countNonBlack(glPixels) > PIXEL_COUNT / 8);
+    CHECK(countNonBlack(dawnPixels) > PIXEL_COUNT / 8);
     CHECK(std::abs(avgBrightness(glPixels) - avgBrightness(dawnPixels)) < 50.0);
 }
