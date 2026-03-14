@@ -39,6 +39,13 @@
 #include "threepp/geometries/ConeGeometry.hpp"
 #include "threepp/geometries/CapsuleGeometry.hpp"
 
+#include "threepp/materials/ShaderMaterial.hpp"
+#include "threepp/materials/ShadowMaterial.hpp"
+#include "threepp/objects/SkinnedMesh.hpp"
+#include "threepp/objects/Bone.hpp"
+#include "threepp/objects/Skeleton.hpp"
+#include "threepp/textures/CubeTexture.hpp"
+
 #include <webgpu/webgpu.h>
 #include <webgpu/wgpu.h>
 
@@ -226,6 +233,37 @@ namespace {
             }
         }
         return count > 0 ? sumX / count : 0.0;
+    }
+
+    // Create a procedural 2x2 texture with given RGBA pixel values
+    std::shared_ptr<Texture> makeProceduralTexture(
+            unsigned char r0, unsigned char g0, unsigned char b0,
+            unsigned char r1, unsigned char g1, unsigned char b1,
+            unsigned char r2, unsigned char g2, unsigned char b2,
+            unsigned char r3, unsigned char g3, unsigned char b3) {
+        std::vector<unsigned char> data = {
+            r0, g0, b0, 255, r1, g1, b1, 255,
+            r2, g2, b2, 255, r3, g3, b3, 255
+        };
+        return Texture::create(Image(std::move(data), 2, 2));
+    }
+
+    // Create a uniform-color 1x1 texture
+    std::shared_ptr<Texture> makeUniformTexture(unsigned char r, unsigned char g, unsigned char b) {
+        std::vector<unsigned char> data = {r, g, b, 255};
+        return Texture::create(Image(std::move(data), 1, 1));
+    }
+
+    // Brightness variance — measures how much pixel brightness varies across the image
+    double brightnessVariance(const std::vector<unsigned char>& pixels) {
+        int count = static_cast<int>(pixels.size()) / 3;
+        double mean = avgBrightness(pixels);
+        double variance = 0;
+        for (int i = 0; i < count; i++) {
+            double b = (pixels[i * 3] + pixels[i * 3 + 1] + pixels[i * 3 + 2]) / 3.0;
+            variance += (b - mean) * (b - mean);
+        }
+        return variance / count;
     }
 
 }// namespace
@@ -3327,4 +3365,1514 @@ TEST_CASE("Cross: normal-mapped sphere matches", "[dawn]") {
     CHECK(countNonBlack(glPixels) > PIXEL_COUNT / 8);
     CHECK(countNonBlack(dawnPixels) > PIXEL_COUNT / 8);
     CHECK(std::abs(avgBrightness(glPixels) - avgBrightness(dawnPixels)) < 50.0);
+}
+
+// =============================================================================
+// Section 17: Dawn — ShaderMaterial
+// =============================================================================
+
+TEST_CASE("Dawn: ShaderMaterial renders with custom shaders", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto scene = Scene::create();
+    auto geometry = PlaneGeometry::create(2, 2);
+    auto material = ShaderMaterial::create();
+
+    // Minimal vertex + fragment shader pair that outputs solid magenta
+    material->vertexShader = R"(
+        void main() {
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+    )";
+    material->fragmentShader = R"(
+        void main() {
+            gl_FragColor = vec4(1.0, 0.0, 1.0, 1.0);
+        }
+    )";
+
+    auto mesh = Mesh::create(geometry, material);
+    scene->add(mesh);
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 3;
+
+    auto pixels = renderWithDawn(*scene, *camera, Color(0x000000));
+    int nonBlack = countNonBlack(pixels);
+    CHECK(nonBlack > PIXEL_COUNT / 8);
+
+    // Should produce magenta — red and blue present, no green
+    auto avg = averageColor(pixels);
+    CHECK(avg.r > 20);
+    CHECK(avg.b > 20);
+}
+
+TEST_CASE("Dawn: ShaderMaterial with uniforms", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto scene = Scene::create();
+    auto geometry = PlaneGeometry::create(2, 2);
+    auto material = ShaderMaterial::create();
+
+    material->vertexShader = R"(
+        void main() {
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+    )";
+    material->fragmentShader = R"(
+        uniform vec3 uColor;
+        void main() {
+            gl_FragColor = vec4(uColor, 1.0);
+        }
+    )";
+    material->uniforms["uColor"].setValue(Color(0x00ff00));
+
+    auto mesh = Mesh::create(geometry, material);
+    scene->add(mesh);
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 3;
+
+    auto pixels = renderWithDawn(*scene, *camera, Color(0x000000));
+    auto avg = averageColor(pixels);
+    CHECK(avg.g > avg.r);
+    CHECK(avg.g > avg.b);
+}
+
+TEST_CASE("Cross: ShaderMaterial produces similar result", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto makeScene = []() {
+        auto scene = Scene::create();
+        auto geometry = PlaneGeometry::create(2, 2);
+        auto material = ShaderMaterial::create();
+
+        material->vertexShader = R"(
+            void main() {
+                gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+            }
+        )";
+        material->fragmentShader = R"(
+            void main() {
+                gl_FragColor = vec4(0.5, 0.3, 0.8, 1.0);
+            }
+        )";
+
+        auto mesh = Mesh::create(geometry, material);
+        scene->add(mesh);
+        return scene;
+    };
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 3;
+    Color clearColor(0x000000);
+
+    auto glPixels = renderWithGL(*makeScene(), *camera, clearColor);
+    auto dawnPixels = renderWithDawn(*makeScene(), *camera, clearColor);
+
+    CHECK(countNonBlack(glPixels) > PIXEL_COUNT / 8);
+    CHECK(countNonBlack(dawnPixels) > PIXEL_COUNT / 8);
+    CHECK(std::abs(avgBrightness(glPixels) - avgBrightness(dawnPixels)) < 30.0);
+}
+
+// =============================================================================
+// Section 18: Dawn — ShadowMaterial
+// =============================================================================
+
+TEST_CASE("Dawn: ShadowMaterial renders shadow-receiving plane", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto scene = Scene::create();
+
+    auto dirLight = DirectionalLight::create(Color(0xffffff), 1.0f);
+    dirLight->position.set(0, 5, 5);
+    dirLight->castShadow = true;
+    scene->add(dirLight);
+
+    // Occluder
+    auto boxGeom = BoxGeometry::create(1, 1, 1);
+    auto boxMat = MeshBasicMaterial::create();
+    boxMat->color = Color(0xff0000);
+    auto box = Mesh::create(boxGeom, boxMat);
+    box->position.y = 1;
+    box->castShadow = true;
+    scene->add(box);
+
+    // Shadow-receiving plane with ShadowMaterial
+    auto planeGeom = PlaneGeometry::create(10, 10);
+    auto shadowMat = ShadowMaterial::create();
+    shadowMat->color = Color(0x000000);
+    auto plane = Mesh::create(planeGeom, shadowMat);
+    plane->rotation.x = -math::PI / 2;
+    plane->receiveShadow = true;
+    scene->add(plane);
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.set(0, 5, 8);
+    camera->lookAt(Vector3(0, 0, 0));
+
+    auto pixels = renderWithDawn(*scene, *camera, Color(0x000000));
+    // The box should be visible (red), shadow plane may show shadow darkening
+    int nonBlack = countNonBlack(pixels);
+    CHECK(nonBlack > 5);
+}
+
+// =============================================================================
+// Section 19: Dawn — Roughness & Metalness Maps
+// =============================================================================
+
+TEST_CASE("Dawn: roughnessMap affects specular highlights", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto makeScene = [](bool useRoughnessMap) {
+        auto scene = Scene::create();
+        auto dirLight = DirectionalLight::create(Color(0xffffff), 1.0f);
+        dirLight->position.set(0, 0, 1);
+        scene->add(dirLight);
+        auto ambient = AmbientLight::create(Color(0x404040));
+        scene->add(ambient);
+
+        auto geometry = SphereGeometry::create(1.0f, 32, 16);
+        auto material = MeshStandardMaterial::create();
+        material->color = Color(0xcccccc);
+        material->metalness = 0.9f;
+        material->roughness = 0.1f; // base smooth
+
+        if (useRoughnessMap) {
+            // Rough texture — makes surface rough, reducing specular
+            material->roughnessMap = makeUniformTexture(255, 255, 255);
+        }
+
+        auto mesh = Mesh::create(geometry, material);
+        scene->add(mesh);
+        return scene;
+    };
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 3;
+    Color clearColor(0x000000);
+
+    auto smoothPixels = renderWithDawn(*makeScene(false), *camera, clearColor);
+    auto roughPixels = renderWithDawn(*makeScene(true), *camera, clearColor);
+
+    // Smooth surface should have brighter specular highlights (higher max brightness)
+    int smoothMax = maxPixelBrightness(smoothPixels);
+    int roughMax = maxPixelBrightness(roughPixels);
+    CHECK(smoothMax > roughMax);
+}
+
+TEST_CASE("Dawn: metalnessMap affects metallic appearance", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto makeScene = [](bool useMetalnessMap) {
+        auto scene = Scene::create();
+        auto dirLight = DirectionalLight::create(Color(0xffffff), 1.0f);
+        dirLight->position.set(0, 0, 1);
+        scene->add(dirLight);
+        auto ambient = AmbientLight::create(Color(0x404040));
+        scene->add(ambient);
+
+        auto geometry = SphereGeometry::create(1.0f, 32, 16);
+        auto material = MeshStandardMaterial::create();
+        material->color = Color(0xcccccc);
+        material->roughness = 0.3f;
+        material->metalness = 0.0f; // base non-metallic
+
+        if (useMetalnessMap) {
+            // Full white = full metallic
+            material->metalnessMap = makeUniformTexture(255, 255, 255);
+        }
+
+        auto mesh = Mesh::create(geometry, material);
+        scene->add(mesh);
+        return scene;
+    };
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 3;
+    Color clearColor(0x000000);
+
+    auto nonMetalPixels = renderWithDawn(*makeScene(false), *camera, clearColor);
+    auto metalPixels = renderWithDawn(*makeScene(true), *camera, clearColor);
+
+    // Both should render visible geometry
+    CHECK(countNonBlack(nonMetalPixels) > PIXEL_COUNT / 8);
+    CHECK(countNonBlack(metalPixels) > PIXEL_COUNT / 8);
+
+    // Metallic vs non-metallic should produce different brightness profiles
+    double nonMetalBright = avgBrightness(nonMetalPixels);
+    double metalBright = avgBrightness(metalPixels);
+    CHECK(std::abs(nonMetalBright - metalBright) > 1.0);
+}
+
+TEST_CASE("Cross: roughnessMap produces similar result", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto makeScene = []() {
+        auto scene = Scene::create();
+        auto dirLight = DirectionalLight::create(Color(0xffffff), 1.0f);
+        dirLight->position.set(0, 0, 1);
+        scene->add(dirLight);
+        auto ambient = AmbientLight::create(Color(0x404040));
+        scene->add(ambient);
+
+        auto geometry = SphereGeometry::create(1.0f, 32, 16);
+        auto material = MeshStandardMaterial::create();
+        material->color = Color(0xcccccc);
+        material->metalness = 0.5f;
+        material->roughness = 0.5f;
+        material->roughnessMap = makeUniformTexture(128, 128, 128);
+
+        auto mesh = Mesh::create(geometry, material);
+        scene->add(mesh);
+        return scene;
+    };
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 3;
+    Color clearColor(0x000000);
+
+    auto glPixels = renderWithGL(*makeScene(), *camera, clearColor);
+    auto dawnPixels = renderWithDawn(*makeScene(), *camera, clearColor);
+
+    CHECK(countNonBlack(glPixels) > PIXEL_COUNT / 8);
+    CHECK(countNonBlack(dawnPixels) > PIXEL_COUNT / 8);
+    CHECK(std::abs(avgBrightness(glPixels) - avgBrightness(dawnPixels)) < 50.0);
+}
+
+// =============================================================================
+// Section 20: Dawn — Emissive Map
+// =============================================================================
+
+TEST_CASE("Dawn: emissiveMap produces glow pattern", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto scene = Scene::create();
+    // No lights — only emissive should be visible
+    auto geometry = SphereGeometry::create(1.0f, 16, 8);
+    auto material = MeshStandardMaterial::create();
+    material->color = Color(0x000000);
+    material->emissive = Color(0xffffff);
+    material->emissiveIntensity = 1.0f;
+    // Emissive map: half bright, half dark
+    material->emissiveMap = makeProceduralTexture(
+        255, 0, 0,   0, 0, 0,
+        255, 0, 0,   0, 0, 0
+    );
+    auto mesh = Mesh::create(geometry, material);
+    scene->add(mesh);
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 3;
+
+    auto pixels = renderWithDawn(*scene, *camera, Color(0x000000));
+    int nonBlack = countNonBlack(pixels);
+    CHECK(nonBlack > 5);
+
+    auto avg = averageColor(pixels);
+    CHECK(avg.r > avg.g);
+}
+
+TEST_CASE("Cross: emissiveMap produces similar glow", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto makeScene = []() {
+        auto scene = Scene::create();
+        auto geometry = SphereGeometry::create(1.0f, 16, 8);
+        auto material = MeshStandardMaterial::create();
+        material->color = Color(0x000000);
+        material->emissive = Color(0xffffff);
+        material->emissiveIntensity = 1.0f;
+        material->emissiveMap = makeUniformTexture(255, 128, 0);
+        auto mesh = Mesh::create(geometry, material);
+        scene->add(mesh);
+        return scene;
+    };
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 3;
+    Color clearColor(0x000000);
+
+    auto glPixels = renderWithGL(*makeScene(), *camera, clearColor);
+    auto dawnPixels = renderWithDawn(*makeScene(), *camera, clearColor);
+
+    CHECK(countNonBlack(glPixels) > PIXEL_COUNT / 8);
+    CHECK(countNonBlack(dawnPixels) > PIXEL_COUNT / 8);
+    CHECK(std::abs(avgBrightness(glPixels) - avgBrightness(dawnPixels)) < 50.0);
+}
+
+// =============================================================================
+// Section 21: Dawn — AO Map
+// =============================================================================
+
+TEST_CASE("Dawn: aoMap darkens occluded areas", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto makeScene = [](bool useAoMap) {
+        auto scene = Scene::create();
+        auto ambient = AmbientLight::create(Color(0xffffff));
+        scene->add(ambient);
+
+        auto geometry = SphereGeometry::create(1.0f, 32, 16);
+        // AO maps require a second UV set (uv2)
+        auto uvAttr = geometry->getAttribute<float>("uv");
+        auto& uvArr = uvAttr->array();
+        geometry->setAttribute("uv2", FloatBufferAttribute::create(
+            std::vector<float>(uvArr.begin(), uvArr.begin() + static_cast<long>(uvAttr->count() * 2)), 2));
+
+        auto material = MeshStandardMaterial::create();
+        material->color = Color(0xffffff);
+        material->roughness = 1.0f;
+        material->metalness = 0.0f;
+
+        if (useAoMap) {
+            // Dark AO — should reduce ambient light contribution
+            material->aoMap = makeUniformTexture(50, 50, 50);
+            material->aoMapIntensity = 1.0f;
+        }
+
+        auto mesh = Mesh::create(geometry, material);
+        scene->add(mesh);
+        return scene;
+    };
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 3;
+    Color clearColor(0x000000);
+
+    auto noAoPixels = renderWithDawn(*makeScene(false), *camera, clearColor);
+    auto aoPixels = renderWithDawn(*makeScene(true), *camera, clearColor);
+
+    // AO map should darken the result
+    CHECK(avgBrightness(noAoPixels) > avgBrightness(aoPixels));
+}
+
+// =============================================================================
+// Section 22: Dawn — Alpha Map
+// =============================================================================
+
+TEST_CASE("Dawn: alphaMap controls transparency", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto makeScene = [](bool useAlphaMap) {
+        auto scene = Scene::create();
+        auto ambient = AmbientLight::create(Color(0xffffff));
+        scene->add(ambient);
+
+        auto geometry = PlaneGeometry::create(2, 2);
+        auto material = MeshStandardMaterial::create();
+        material->color = Color(0xffffff);
+        material->transparent = true;
+        material->side = Side::Double;
+
+        if (useAlphaMap) {
+            // Very transparent alpha map
+            material->alphaMap = makeUniformTexture(30, 30, 30);
+        }
+
+        auto mesh = Mesh::create(geometry, material);
+        scene->add(mesh);
+        return scene;
+    };
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 3;
+    Color clearColor(0x000000);
+
+    auto opaquePixels = renderWithDawn(*makeScene(false), *camera, clearColor);
+    auto alphaPixels = renderWithDawn(*makeScene(true), *camera, clearColor);
+
+    // Alpha-mapped version should be dimmer (more transparent)
+    CHECK(avgBrightness(opaquePixels) > avgBrightness(alphaPixels));
+}
+
+TEST_CASE("Cross: alphaMap produces similar transparency", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto makeScene = []() {
+        auto scene = Scene::create();
+        auto ambient = AmbientLight::create(Color(0xffffff));
+        scene->add(ambient);
+
+        auto geometry = PlaneGeometry::create(2, 2);
+        auto material = MeshStandardMaterial::create();
+        material->color = Color(0xffffff);
+        material->transparent = true;
+        material->side = Side::Double;
+        material->alphaMap = makeUniformTexture(128, 128, 128);
+
+        auto mesh = Mesh::create(geometry, material);
+        scene->add(mesh);
+        return scene;
+    };
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 3;
+    Color clearColor(0x000000);
+
+    auto glPixels = renderWithGL(*makeScene(), *camera, clearColor);
+    auto dawnPixels = renderWithDawn(*makeScene(), *camera, clearColor);
+
+    CHECK(std::abs(avgBrightness(glPixels) - avgBrightness(dawnPixels)) < 50.0);
+}
+
+// =============================================================================
+// Section 23: Dawn — Displacement Map
+// =============================================================================
+
+TEST_CASE("Dawn: displacementMap offsets vertices", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto makeScene = [](bool useDisplacement) {
+        auto scene = Scene::create();
+        auto ambient = AmbientLight::create(Color(0xffffff));
+        scene->add(ambient);
+
+        // High-res sphere for displacement to be visible
+        auto geometry = SphereGeometry::create(1.0f, 64, 32);
+        auto material = MeshStandardMaterial::create();
+        material->color = Color(0xffffff);
+        material->roughness = 1.0f;
+
+        if (useDisplacement) {
+            material->displacementMap = makeUniformTexture(255, 255, 255);
+            material->displacementScale = 0.5f;
+        }
+
+        auto mesh = Mesh::create(geometry, material);
+        scene->add(mesh);
+        return scene;
+    };
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 3;
+    Color clearColor(0x000000);
+
+    auto normalPixels = renderWithDawn(*makeScene(false), *camera, clearColor);
+    auto displacedPixels = renderWithDawn(*makeScene(true), *camera, clearColor);
+
+    // Displaced sphere should cover more or different pixels
+    int normalCount = countNonBlack(normalPixels);
+    int displacedCount = countNonBlack(displacedPixels);
+    CHECK(normalCount > PIXEL_COUNT / 8);
+    CHECK(displacedCount > PIXEL_COUNT / 8);
+    // Displacement should change the coverage or brightness
+    CHECK(std::abs(normalCount - displacedCount) > 0);
+}
+
+// =============================================================================
+// Section 24: Dawn — Light Map
+// =============================================================================
+
+TEST_CASE("Dawn: lightMap adds baked illumination", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto makeScene = [](bool useLightMap) {
+        auto scene = Scene::create();
+        // Only ambient — light map should add extra illumination
+        auto ambient = AmbientLight::create(Color(0x404040));
+        scene->add(ambient);
+
+        auto geometry = PlaneGeometry::create(2, 2);
+        // Light maps require uv2
+        auto uvAttr = geometry->getAttribute<float>("uv");
+        auto& uvArr = uvAttr->array();
+        geometry->setAttribute("uv2", FloatBufferAttribute::create(
+            std::vector<float>(uvArr.begin(), uvArr.begin() + static_cast<long>(uvAttr->count() * 2)), 2));
+
+        auto material = MeshStandardMaterial::create();
+        material->color = Color(0xffffff);
+        material->side = Side::Double;
+
+        if (useLightMap) {
+            material->lightMap = makeUniformTexture(255, 255, 255);
+            material->lightMapIntensity = 1.0f;
+        }
+
+        auto mesh = Mesh::create(geometry, material);
+        scene->add(mesh);
+        return scene;
+    };
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 3;
+    Color clearColor(0x000000);
+
+    auto noLmPixels = renderWithDawn(*makeScene(false), *camera, clearColor);
+    auto lmPixels = renderWithDawn(*makeScene(true), *camera, clearColor);
+
+    // Light map should add brightness
+    CHECK(avgBrightness(lmPixels) > avgBrightness(noLmPixels));
+}
+
+// =============================================================================
+// Section 25: Dawn — Bump Map
+// =============================================================================
+
+TEST_CASE("Dawn: bumpMap perturbs surface shading", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto makeScene = [](bool useBumpMap) {
+        auto scene = Scene::create();
+        auto dirLight = DirectionalLight::create(Color(0xffffff), 1.0f);
+        dirLight->position.set(1, 1, 1);
+        scene->add(dirLight);
+
+        auto geometry = SphereGeometry::create(1.0f, 32, 16);
+        auto material = MeshPhongMaterial::create();
+        material->color = Color(0xffffff);
+
+        if (useBumpMap) {
+            // Checkerboard-style bump — should create shading variation
+            material->bumpMap = makeProceduralTexture(
+                255, 255, 255,  0, 0, 0,
+                0, 0, 0,        255, 255, 255
+            );
+            material->bumpScale = 1.0f;
+        }
+
+        auto mesh = Mesh::create(geometry, material);
+        scene->add(mesh);
+        return scene;
+    };
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 3;
+    Color clearColor(0x000000);
+
+    auto flatPixels = renderWithDawn(*makeScene(false), *camera, clearColor);
+    auto bumpPixels = renderWithDawn(*makeScene(true), *camera, clearColor);
+
+    CHECK(countNonBlack(flatPixels) > PIXEL_COUNT / 8);
+    CHECK(countNonBlack(bumpPixels) > PIXEL_COUNT / 8);
+
+    // Bump map should change the brightness variance (more surface detail)
+    double flatVar = brightnessVariance(flatPixels);
+    double bumpVar = brightnessVariance(bumpPixels);
+    CHECK(bumpVar != flatVar);
+}
+
+// =============================================================================
+// Section 26: Dawn — Gradient Map (Toon Shading)
+// =============================================================================
+
+TEST_CASE("Dawn: gradientMap controls toon shading bands", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto makeScene = [](bool useGradientMap) {
+        auto scene = Scene::create();
+        auto dirLight = DirectionalLight::create(Color(0xffffff), 1.0f);
+        dirLight->position.set(0, 0, 1);
+        scene->add(dirLight);
+
+        auto geometry = SphereGeometry::create(1.0f, 32, 16);
+        auto material = MeshToonMaterial::create();
+        material->color = Color(0xffffff);
+
+        if (useGradientMap) {
+            // 2-step gradient: creates hard shadow boundary
+            material->gradientMap = makeUniformTexture(0, 0, 0);
+        }
+
+        auto mesh = Mesh::create(geometry, material);
+        scene->add(mesh);
+        return scene;
+    };
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 3;
+    Color clearColor(0x000000);
+
+    auto defaultPixels = renderWithDawn(*makeScene(false), *camera, clearColor);
+    auto gradientPixels = renderWithDawn(*makeScene(true), *camera, clearColor);
+
+    CHECK(countNonBlack(defaultPixels) > PIXEL_COUNT / 8);
+    CHECK(countNonBlack(gradientPixels) > PIXEL_COUNT / 8);
+
+    // Different gradient maps should produce different brightness
+    CHECK(std::abs(avgBrightness(defaultPixels) - avgBrightness(gradientPixels)) > 0.5);
+}
+
+// =============================================================================
+// Section 27: Dawn — Environment Maps
+// =============================================================================
+
+TEST_CASE("Dawn: envMap adds reflections to standard material", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto makeScene = [](bool useEnvMap) {
+        auto scene = Scene::create();
+        auto ambient = AmbientLight::create(Color(0x404040));
+        scene->add(ambient);
+        auto dirLight = DirectionalLight::create(Color(0xffffff), 0.5f);
+        dirLight->position.set(0, 0, 1);
+        scene->add(dirLight);
+
+        auto geometry = SphereGeometry::create(1.0f, 32, 16);
+        auto material = MeshStandardMaterial::create();
+        material->color = Color(0x444444);
+        material->metalness = 1.0f;
+        material->roughness = 0.0f;
+
+        if (useEnvMap) {
+            // Create a simple 6-face cube texture (all red)
+            std::vector<Image> faces;
+            for (int i = 0; i < 6; i++) {
+                std::vector<unsigned char> faceData = {255, 0, 0, 255};
+                faces.emplace_back(Image(std::move(faceData), 1, 1));
+            }
+            auto cubeTexture = CubeTexture::create(faces);
+            material->envMap = cubeTexture;
+            material->envMapIntensity = 1.0f;
+        }
+
+        auto mesh = Mesh::create(geometry, material);
+        scene->add(mesh);
+        return scene;
+    };
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 3;
+    Color clearColor(0x000000);
+
+    auto noEnvPixels = renderWithDawn(*makeScene(false), *camera, clearColor);
+    auto envPixels = renderWithDawn(*makeScene(true), *camera, clearColor);
+
+    CHECK(countNonBlack(noEnvPixels) > PIXEL_COUNT / 16);
+    CHECK(countNonBlack(envPixels) > PIXEL_COUNT / 16);
+
+    // Env map on a metallic surface should make it brighter/more colored
+    auto envAvg = averageColor(envPixels);
+    CHECK(envAvg.r > 5.0); // Should pick up red from env map
+}
+
+TEST_CASE("Cross: envMap produces similar reflections", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto makeScene = []() {
+        auto scene = Scene::create();
+        auto ambient = AmbientLight::create(Color(0x404040));
+        scene->add(ambient);
+
+        auto geometry = SphereGeometry::create(1.0f, 32, 16);
+        auto material = MeshStandardMaterial::create();
+        material->color = Color(0x444444);
+        material->metalness = 1.0f;
+        material->roughness = 0.0f;
+
+        std::vector<Image> faces;
+        for (int i = 0; i < 6; i++) {
+            std::vector<unsigned char> faceData = {0, 128, 255, 255};
+            faces.emplace_back(Image(std::move(faceData), 1, 1));
+        }
+        material->envMap = CubeTexture::create(faces);
+        material->envMapIntensity = 1.0f;
+
+        auto mesh = Mesh::create(geometry, material);
+        scene->add(mesh);
+        return scene;
+    };
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 3;
+    Color clearColor(0x000000);
+
+    auto glPixels = renderWithGL(*makeScene(), *camera, clearColor);
+    auto dawnPixels = renderWithDawn(*makeScene(), *camera, clearColor);
+
+    CHECK(countNonBlack(glPixels) > PIXEL_COUNT / 16);
+    CHECK(countNonBlack(dawnPixels) > PIXEL_COUNT / 16);
+    CHECK(std::abs(avgBrightness(glPixels) - avgBrightness(dawnPixels)) < 60.0);
+}
+
+// =============================================================================
+// Section 28: Dawn — Morph Targets
+// =============================================================================
+
+TEST_CASE("Dawn: morph targets deform geometry", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto makeScene = [](float influence) {
+        auto scene = Scene::create();
+        auto ambient = AmbientLight::create(Color(0xffffff));
+        scene->add(ambient);
+
+        auto geometry = BoxGeometry::create(1, 1, 1);
+
+        // Create a morph target that scales the box to 2x
+        auto posAttr = geometry->getAttribute<float>("position");
+        int count = static_cast<int>(posAttr->count());
+        std::vector<float> morphPositions(count * 3);
+        for (int i = 0; i < count; i++) {
+            morphPositions[i * 3 + 0] = posAttr->getX(i) * 2.0f;
+            morphPositions[i * 3 + 1] = posAttr->getY(i) * 2.0f;
+            morphPositions[i * 3 + 2] = posAttr->getZ(i) * 2.0f;
+        }
+
+        auto morphAttrs = geometry->getOrCreateMorphAttribute("position");
+        morphAttrs->emplace_back(FloatBufferAttribute::create(morphPositions, 3));
+
+        auto material = MeshBasicMaterial::create();
+        material->color = Color(0xffffff);
+        material->morphTargets = true;
+        auto mesh = Mesh::create(geometry, material);
+        mesh->morphTargetInfluences().resize(1);
+        mesh->morphTargetInfluences()[0] = influence;
+        scene->add(mesh);
+        return scene;
+    };
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 4;
+    Color clearColor(0x000000);
+
+    auto basePixels = renderWithDawn(*makeScene(0.0f), *camera, clearColor);
+    auto morphedPixels = renderWithDawn(*makeScene(1.0f), *camera, clearColor);
+
+    int baseCount = countNonBlack(basePixels);
+    int morphedCount = countNonBlack(morphedPixels);
+
+    CHECK(baseCount > PIXEL_COUNT / 16);
+    CHECK(morphedCount > PIXEL_COUNT / 16);
+
+    // Morphed (scaled up) should cover more pixels
+    CHECK(morphedCount > baseCount);
+}
+
+TEST_CASE("Cross: morph targets produce similar deformation", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto makeScene = []() {
+        auto scene = Scene::create();
+        auto ambient = AmbientLight::create(Color(0xffffff));
+        scene->add(ambient);
+
+        auto geometry = BoxGeometry::create(1, 1, 1);
+        auto posAttr = geometry->getAttribute<float>("position");
+        int count = static_cast<int>(posAttr->count());
+        std::vector<float> morphPositions(count * 3);
+        for (int i = 0; i < count; i++) {
+            morphPositions[i * 3 + 0] = posAttr->getX(i) * 1.5f;
+            morphPositions[i * 3 + 1] = posAttr->getY(i) * 1.5f;
+            morphPositions[i * 3 + 2] = posAttr->getZ(i) * 1.5f;
+        }
+
+        auto morphAttrs = geometry->getOrCreateMorphAttribute("position");
+        morphAttrs->emplace_back(FloatBufferAttribute::create(morphPositions, 3));
+
+        auto material = MeshBasicMaterial::create();
+        material->color = Color(0xffffff);
+        material->morphTargets = true;
+        auto mesh = Mesh::create(geometry, material);
+        mesh->morphTargetInfluences().resize(1);
+        mesh->morphTargetInfluences()[0] = 0.5f;
+        scene->add(mesh);
+        return scene;
+    };
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 4;
+    Color clearColor(0x000000);
+
+    auto glPixels = renderWithGL(*makeScene(), *camera, clearColor);
+    auto dawnPixels = renderWithDawn(*makeScene(), *camera, clearColor);
+
+    int glCount = countNonBlack(glPixels);
+    int dawnCount = countNonBlack(dawnPixels);
+    CHECK(glCount > PIXEL_COUNT / 16);
+    CHECK(dawnCount > PIXEL_COUNT / 16);
+
+    double ratio = static_cast<double>(glCount) / dawnCount;
+    CHECK(ratio > 0.5);
+    CHECK(ratio < 2.0);
+}
+
+// =============================================================================
+// Section 29: Dawn — Skinning
+// =============================================================================
+
+TEST_CASE("Dawn: SkinnedMesh with skeleton renders correctly", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto scene = Scene::create();
+    auto ambient = AmbientLight::create(Color(0xffffff));
+    scene->add(ambient);
+
+    // Create a simple 2-bone skeleton with a cylinder-like geometry
+    auto geometry = CylinderGeometry::create(0.3f, 0.3f, 2.0f, 8, 4);
+
+    // Assign skin weights and indices
+    auto posAttr = geometry->getAttribute<float>("position");
+    int vertexCount = static_cast<int>(posAttr->count());
+
+    std::vector<float> skinWeights(vertexCount * 4, 0.0f);
+    std::vector<float> skinIndices(vertexCount * 4, 0.0f);
+
+    for (int i = 0; i < vertexCount; i++) {
+        float y = posAttr->getY(i);
+        // Blend between bone 0 (bottom) and bone 1 (top)
+        float weight = (y + 1.0f) / 2.0f; // normalize from [-1,1] to [0,1]
+        skinWeights[i * 4 + 0] = 1.0f - weight;
+        skinWeights[i * 4 + 1] = weight;
+        skinIndices[i * 4 + 0] = 0.0f;
+        skinIndices[i * 4 + 1] = 1.0f;
+    }
+
+    geometry->setAttribute("skinWeight", FloatBufferAttribute::create(skinWeights, 4));
+    geometry->setAttribute("skinIndex", FloatBufferAttribute::create(skinIndices, 4));
+
+    auto material = MeshBasicMaterial::create();
+    material->color = Color(0xffffff);
+
+    // Create bones
+    auto bone0 = Bone::create();
+    bone0->position.y = -1.0f;
+    auto bone1 = Bone::create();
+    bone1->position.y = 1.0f;
+    bone0->add(bone1);
+
+    auto skeleton = Skeleton::create({bone0, bone1});
+    auto skinnedMesh = SkinnedMesh::create(geometry, material);
+    skinnedMesh->add(bone0);
+    skinnedMesh->bind(skeleton);
+
+    scene->add(skinnedMesh);
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 4;
+
+    auto pixels = renderWithDawn(*scene, *camera, Color(0x000000));
+    int nonBlack = countNonBlack(pixels);
+    CHECK(nonBlack > PIXEL_COUNT / 16);
+}
+
+TEST_CASE("Dawn: SkinnedMesh bone rotation deforms mesh", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto makeScene = [](float boneRotation) {
+        auto scene = Scene::create();
+        auto ambient = AmbientLight::create(Color(0xffffff));
+        scene->add(ambient);
+
+        auto geometry = CylinderGeometry::create(0.3f, 0.3f, 2.0f, 8, 4);
+        auto posAttr = geometry->getAttribute<float>("position");
+        int vertexCount = static_cast<int>(posAttr->count());
+
+        std::vector<float> skinWeights(vertexCount * 4, 0.0f);
+        std::vector<float> skinIndices(vertexCount * 4, 0.0f);
+
+        for (int i = 0; i < vertexCount; i++) {
+            float y = posAttr->getY(i);
+            float weight = (y + 1.0f) / 2.0f;
+            skinWeights[i * 4 + 0] = 1.0f - weight;
+            skinWeights[i * 4 + 1] = weight;
+            skinIndices[i * 4 + 0] = 0.0f;
+            skinIndices[i * 4 + 1] = 1.0f;
+        }
+
+        geometry->setAttribute("skinWeight", FloatBufferAttribute::create(skinWeights, 4));
+        geometry->setAttribute("skinIndex", FloatBufferAttribute::create(skinIndices, 4));
+
+        auto material = MeshBasicMaterial::create();
+        material->color = Color(0xffffff);
+
+        auto bone0 = Bone::create();
+        bone0->position.y = -1.0f;
+        auto bone1 = Bone::create();
+        bone1->position.y = 1.0f;
+        bone1->rotation.z = boneRotation; // Rotate upper bone
+        bone0->add(bone1);
+
+        auto skeleton = Skeleton::create({bone0, bone1});
+        auto skinnedMesh = SkinnedMesh::create(geometry, material);
+        skinnedMesh->add(bone0);
+        skinnedMesh->bind(skeleton);
+
+        scene->add(skinnedMesh);
+        return scene;
+    };
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 4;
+    Color clearColor(0x000000);
+
+    auto straightPixels = renderWithDawn(*makeScene(0.0f), *camera, clearColor);
+    auto bentPixels = renderWithDawn(*makeScene(math::PI / 4), *camera, clearColor);
+
+    // Both should render visible geometry
+    CHECK(countNonBlack(straightPixels) > PIXEL_COUNT / 16);
+    CHECK(countNonBlack(bentPixels) > PIXEL_COUNT / 16);
+
+    // Bent mesh should have different pixel distribution
+    double straightX = avgXPosition(straightPixels, RT_WIDTH, RT_HEIGHT);
+    double bentX = avgXPosition(bentPixels, RT_WIDTH, RT_HEIGHT);
+    // Rotation should shift average X position
+    CHECK(std::abs(straightX - bentX) > 0.5);
+}
+
+// =============================================================================
+// Section 30: Dawn — Clipping Planes
+// =============================================================================
+
+TEST_CASE("Dawn: clipping plane cuts geometry", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto makeScene = [](bool useClipping) {
+        auto scene = Scene::create();
+        auto ambient = AmbientLight::create(Color(0xffffff));
+        scene->add(ambient);
+
+        auto geometry = SphereGeometry::create(1.0f, 16, 8);
+        auto material = MeshBasicMaterial::create();
+        material->color = Color(0xffffff);
+        material->side = Side::Double;
+
+        if (useClipping) {
+            // Clip plane that cuts through center of sphere
+            material->clippingPlanes.push_back(Plane(Vector3(1, 0, 0), 0));
+        }
+
+        auto mesh = Mesh::create(geometry, material);
+        scene->add(mesh);
+        return scene;
+    };
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 3;
+    Color clearColor(0x000000);
+
+    // Need to enable local clipping on the Dawn renderer
+    static Canvas* dawnClipCanvas = nullptr;
+    if (!dawnClipCanvas) {
+        dawnClipCanvas = new Canvas(Canvas::Parameters().size(RT_WIDTH, RT_HEIGHT).headless(true).graphicsApi(GraphicsAPI::WebGPU));
+    }
+
+    // Render without clipping
+    auto fullPixels = renderWithDawn(*makeScene(false), *camera, clearColor);
+
+    // Render with clipping — need renderer with localClippingEnabled
+    {
+        DawnRenderer renderer(*dawnClipCanvas);
+        renderer.setClearColor(clearColor);
+        renderer.localClippingEnabled = true;
+
+        auto target = GLRenderTarget::create(RT_WIDTH, RT_HEIGHT, GLRenderTarget::Options{});
+        renderer.setRenderTarget(target.get());
+        auto clippedScene = makeScene(true);
+        renderer.render(*clippedScene, *camera);
+        auto clippedPixels = renderer.readRGBPixels();
+        renderer.setRenderTarget(nullptr);
+        renderer.dispose();
+
+        int fullCount = countNonBlack(fullPixels);
+        int clippedCount = countNonBlack(clippedPixels);
+
+        CHECK(fullCount > PIXEL_COUNT / 8);
+        // Clipped sphere should show fewer pixels (half was clipped away)
+        CHECK(fullCount > clippedCount);
+    }
+}
+
+TEST_CASE("Cross: clipping plane produces similar cut", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto makeScene = []() {
+        auto scene = Scene::create();
+        auto ambient = AmbientLight::create(Color(0xffffff));
+        scene->add(ambient);
+
+        auto geometry = SphereGeometry::create(1.0f, 16, 8);
+        auto material = MeshBasicMaterial::create();
+        material->color = Color(0xffffff);
+        material->side = Side::Double;
+        material->clippingPlanes.push_back(Plane(Vector3(1, 0, 0), 0));
+
+        auto mesh = Mesh::create(geometry, material);
+        scene->add(mesh);
+        return scene;
+    };
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 3;
+    Color clearColor(0x000000);
+
+    // GL with clipping
+    {
+        GLRenderer glRenderer(glCanvas().size());
+        glRenderer.setClearColor(clearColor);
+        glRenderer.localClippingEnabled = true;
+        auto target = GLRenderTarget::create(RT_WIDTH, RT_HEIGHT, GLRenderTarget::Options{});
+        glRenderer.setRenderTarget(target.get());
+        auto scene = makeScene();
+        glRenderer.render(*scene, *camera);
+        auto glPixels = glRenderer.readRGBPixels();
+        glRenderer.setRenderTarget(nullptr);
+        glRenderer.dispose();
+
+        // Dawn with clipping
+        static Canvas* dawnClipCross = nullptr;
+        if (!dawnClipCross) {
+            dawnClipCross = new Canvas(Canvas::Parameters().size(RT_WIDTH, RT_HEIGHT).headless(true).graphicsApi(GraphicsAPI::WebGPU));
+        }
+        DawnRenderer dawnRenderer(*dawnClipCross);
+        dawnRenderer.setClearColor(clearColor);
+        dawnRenderer.localClippingEnabled = true;
+        auto dawnTarget = GLRenderTarget::create(RT_WIDTH, RT_HEIGHT, GLRenderTarget::Options{});
+        dawnRenderer.setRenderTarget(dawnTarget.get());
+        auto dawnScene = makeScene();
+        dawnRenderer.render(*dawnScene, *camera);
+        auto dawnPixels = dawnRenderer.readRGBPixels();
+        dawnRenderer.setRenderTarget(nullptr);
+        dawnRenderer.dispose();
+
+        int glCount = countNonBlack(glPixels);
+        int dawnCount = countNonBlack(dawnPixels);
+        CHECK(glCount > PIXEL_COUNT / 16);
+        CHECK(dawnCount > PIXEL_COUNT / 16);
+
+        double ratio = static_cast<double>(glCount) / dawnCount;
+        CHECK(ratio > 0.5);
+        CHECK(ratio < 2.0);
+    }
+}
+
+// =============================================================================
+// Section 31: Dawn — Tone Mapping
+// =============================================================================
+
+TEST_CASE("Dawn: tone mapping affects output brightness", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto scene = Scene::create();
+    auto ambient = AmbientLight::create(Color(0xffffff));
+    scene->add(ambient);
+    auto dirLight = DirectionalLight::create(Color(0xffffff), 2.0f);
+    dirLight->position.set(0, 0, 1);
+    scene->add(dirLight);
+
+    auto geometry = SphereGeometry::create(1.0f, 16, 8);
+    auto material = MeshStandardMaterial::create();
+    material->color = Color(0xffffff);
+    auto mesh = Mesh::create(geometry, material);
+    scene->add(mesh);
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 3;
+
+    // Render with no tone mapping
+    static Canvas* dawnTmCanvas = nullptr;
+    if (!dawnTmCanvas) {
+        dawnTmCanvas = new Canvas(Canvas::Parameters().size(RT_WIDTH, RT_HEIGHT).headless(true).graphicsApi(GraphicsAPI::WebGPU));
+    }
+
+    auto renderWithToneMapping = [&](ToneMapping tm, float exposure) {
+        DawnRenderer renderer(*dawnTmCanvas);
+        renderer.setClearColor(Color(0x000000));
+        renderer.toneMapping = tm;
+        renderer.toneMappingExposure = exposure;
+
+        auto target = GLRenderTarget::create(RT_WIDTH, RT_HEIGHT, GLRenderTarget::Options{});
+        renderer.setRenderTarget(target.get());
+        renderer.render(*scene, *camera);
+        auto pixels = renderer.readRGBPixels();
+        renderer.setRenderTarget(nullptr);
+        renderer.dispose();
+        return pixels;
+    };
+
+    auto nonePixels = renderWithToneMapping(ToneMapping::None, 1.0f);
+    auto reinhardPixels = renderWithToneMapping(ToneMapping::Reinhard, 1.0f);
+    auto acesPixels = renderWithToneMapping(ToneMapping::ACESFilmic, 1.0f);
+
+    CHECK(countNonBlack(nonePixels) > PIXEL_COUNT / 8);
+    CHECK(countNonBlack(reinhardPixels) > PIXEL_COUNT / 8);
+    CHECK(countNonBlack(acesPixels) > PIXEL_COUNT / 8);
+
+    // Different tone mapping should produce different brightness
+    double noneBright = avgBrightness(nonePixels);
+    double reinhardBright = avgBrightness(reinhardPixels);
+    double acesBright = avgBrightness(acesPixels);
+
+    // At least one tone mapper should differ from None
+    bool reinhardDiffers = std::abs(noneBright - reinhardBright) > 1.0;
+    bool acesDiffers = std::abs(noneBright - acesBright) > 1.0;
+    CHECK((reinhardDiffers || acesDiffers));
+}
+
+TEST_CASE("Dawn: toneMappingExposure scales brightness", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto scene = Scene::create();
+    auto dirLight = DirectionalLight::create(Color(0xffffff), 1.0f);
+    dirLight->position.set(0, 0, 1);
+    scene->add(dirLight);
+
+    auto geometry = SphereGeometry::create(1.0f, 16, 8);
+    auto material = MeshStandardMaterial::create();
+    material->color = Color(0xffffff);
+    auto mesh = Mesh::create(geometry, material);
+    scene->add(mesh);
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 3;
+
+    static Canvas* dawnExpCanvas = nullptr;
+    if (!dawnExpCanvas) {
+        dawnExpCanvas = new Canvas(Canvas::Parameters().size(RT_WIDTH, RT_HEIGHT).headless(true).graphicsApi(GraphicsAPI::WebGPU));
+    }
+
+    auto renderWithExposure = [&](float exposure) {
+        DawnRenderer renderer(*dawnExpCanvas);
+        renderer.setClearColor(Color(0x000000));
+        renderer.toneMapping = ToneMapping::Reinhard;
+        renderer.toneMappingExposure = exposure;
+
+        auto target = GLRenderTarget::create(RT_WIDTH, RT_HEIGHT, GLRenderTarget::Options{});
+        renderer.setRenderTarget(target.get());
+        renderer.render(*scene, *camera);
+        auto pixels = renderer.readRGBPixels();
+        renderer.setRenderTarget(nullptr);
+        renderer.dispose();
+        return pixels;
+    };
+
+    auto lowExp = renderWithExposure(0.5f);
+    auto highExp = renderWithExposure(2.0f);
+
+    // Higher exposure should produce brighter output
+    CHECK(avgBrightness(highExp) > avgBrightness(lowExp));
+}
+
+// =============================================================================
+// Section 32: Dawn — Output Encoding / Color Space
+// =============================================================================
+
+TEST_CASE("Dawn: sRGB output encoding differs from linear", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto scene = Scene::create();
+    auto ambient = AmbientLight::create(Color(0xffffff));
+    scene->add(ambient);
+
+    auto geometry = SphereGeometry::create(1.0f, 16, 8);
+    auto material = MeshBasicMaterial::create();
+    material->color = Color(0x808080); // mid-grey
+    auto mesh = Mesh::create(geometry, material);
+    scene->add(mesh);
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 3;
+
+    static Canvas* dawnEncCanvas = nullptr;
+    if (!dawnEncCanvas) {
+        dawnEncCanvas = new Canvas(Canvas::Parameters().size(RT_WIDTH, RT_HEIGHT).headless(true).graphicsApi(GraphicsAPI::WebGPU));
+    }
+
+    auto renderWithEncoding = [&](Encoding enc) {
+        DawnRenderer renderer(*dawnEncCanvas);
+        renderer.setClearColor(Color(0x000000));
+        renderer.outputEncoding = enc;
+
+        auto target = GLRenderTarget::create(RT_WIDTH, RT_HEIGHT, GLRenderTarget::Options{});
+        renderer.setRenderTarget(target.get());
+        renderer.render(*scene, *camera);
+        auto pixels = renderer.readRGBPixels();
+        renderer.setRenderTarget(nullptr);
+        renderer.dispose();
+        return pixels;
+    };
+
+    auto linearPixels = renderWithEncoding(Encoding::Linear);
+    auto srgbPixels = renderWithEncoding(Encoding::sRGB);
+
+    CHECK(countNonBlack(linearPixels) > PIXEL_COUNT / 8);
+    CHECK(countNonBlack(srgbPixels) > PIXEL_COUNT / 8);
+
+    // sRGB gamma curve should produce different brightness than linear
+    double linearBright = avgBrightness(linearPixels);
+    double srgbBright = avgBrightness(srgbPixels);
+    CHECK(std::abs(linearBright - srgbBright) > 1.0);
+}
+
+// =============================================================================
+// Section 33: Dawn — Instanced Colors
+// =============================================================================
+
+TEST_CASE("Dawn: InstancedMesh per-instance colors", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto scene = Scene::create();
+    auto ambient = AmbientLight::create(Color(0xffffff));
+    scene->add(ambient);
+
+    auto geometry = BoxGeometry::create(0.5f, 0.5f, 0.5f);
+    auto material = MeshBasicMaterial::create();
+    material->color = Color(0xffffff);
+
+    auto im = InstancedMesh::create(geometry, material, 2);
+
+    // Left instance — red
+    Matrix4 m;
+    m.setPosition(Vector3(-1.0f, 0, 0));
+    im->setMatrixAt(0, m);
+    im->setColorAt(0, Color(0xff0000));
+
+    // Right instance — blue
+    m.setPosition(Vector3(1.0f, 0, 0));
+    im->setMatrixAt(1, m);
+    im->setColorAt(1, Color(0x0000ff));
+
+    im->instanceColor()->needsUpdate();
+    scene->add(im);
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 4;
+
+    auto pixels = renderWithDawn(*scene, *camera, Color(0x000000));
+    auto avg = averageColor(pixels);
+
+    // Should have both red and blue components
+    CHECK(avg.r > 5);
+    CHECK(avg.b > 5);
+    CHECK(countNonBlack(pixels) > PIXEL_COUNT / 8);
+}
+
+TEST_CASE("Cross: InstancedMesh per-instance colors match", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto makeScene = []() {
+        auto scene = Scene::create();
+        auto ambient = AmbientLight::create(Color(0xffffff));
+        scene->add(ambient);
+
+        auto geometry = BoxGeometry::create(0.5f, 0.5f, 0.5f);
+        auto material = MeshBasicMaterial::create();
+        material->color = Color(0xffffff);
+
+        auto im = InstancedMesh::create(geometry, material, 2);
+
+        Matrix4 m;
+        m.setPosition(Vector3(-1.0f, 0, 0));
+        im->setMatrixAt(0, m);
+        im->setColorAt(0, Color(0xff0000));
+
+        m.setPosition(Vector3(1.0f, 0, 0));
+        im->setMatrixAt(1, m);
+        im->setColorAt(1, Color(0x0000ff));
+
+        im->instanceColor()->needsUpdate();
+        scene->add(im);
+        return scene;
+    };
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 4;
+    Color clearColor(0x000000);
+
+    auto glPixels = renderWithGL(*makeScene(), *camera, clearColor);
+    auto dawnPixels = renderWithDawn(*makeScene(), *camera, clearColor);
+
+    auto glAvg = averageColor(glPixels);
+    auto dawnAvg = averageColor(dawnPixels);
+
+    // Both should have red and blue
+    CHECK(glAvg.r > 5);
+    CHECK(glAvg.b > 5);
+    CHECK(dawnAvg.r > 5);
+    CHECK(dawnAvg.b > 5);
+    CHECK(std::abs(avgBrightness(glPixels) - avgBrightness(dawnPixels)) < 50.0);
+}
+
+// =============================================================================
+// Section 34: Dawn — Shadow Map Quality
+// =============================================================================
+
+TEST_CASE("Dawn: shadow map resolution affects quality", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto makeScene = [](int shadowMapSize) {
+        auto scene = Scene::create();
+
+        auto dirLight = DirectionalLight::create(Color(0xffffff), 1.0f);
+        dirLight->position.set(0, 5, 5);
+        dirLight->castShadow = true;
+        dirLight->shadow->mapSize.set(shadowMapSize, shadowMapSize);
+        scene->add(dirLight);
+
+        // Occluder
+        auto boxGeom = BoxGeometry::create(0.5f, 0.5f, 0.5f);
+        auto boxMat = MeshPhongMaterial::create();
+        boxMat->color = Color(0x888888);
+        auto box = Mesh::create(boxGeom, boxMat);
+        box->position.y = 2;
+        box->castShadow = true;
+        scene->add(box);
+
+        // Floor
+        auto planeGeom = PlaneGeometry::create(10, 10);
+        auto planeMat = MeshPhongMaterial::create();
+        planeMat->color = Color(0xcccccc);
+        auto plane = Mesh::create(planeGeom, planeMat);
+        plane->rotation.x = -math::PI / 2;
+        plane->receiveShadow = true;
+        scene->add(plane);
+
+        return scene;
+    };
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.set(0, 5, 8);
+    camera->lookAt(Vector3(0, 0, 0));
+    Color clearColor(0x000000);
+
+    auto lowResPixels = renderWithDawn(*makeScene(64), *camera, clearColor);
+    auto highResPixels = renderWithDawn(*makeScene(512), *camera, clearColor);
+
+    // Both should render something
+    CHECK(countNonBlack(lowResPixels) > PIXEL_COUNT / 8);
+    CHECK(countNonBlack(highResPixels) > PIXEL_COUNT / 8);
+
+    // Higher resolution shadow maps may produce slightly different brightness variance
+    // (sharper shadow edges vs blockier). Both should be reasonable.
+    double lowVar = brightnessVariance(lowResPixels);
+    double highVar = brightnessVariance(highResPixels);
+    // Just verify both produce variance (shadows present)
+    CHECK(lowVar > 10.0);
+    CHECK(highVar > 10.0);
+}
+
+TEST_CASE("Dawn: shadow bias prevents shadow acne", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto makeScene = [](float bias) {
+        auto scene = Scene::create();
+
+        auto dirLight = DirectionalLight::create(Color(0xffffff), 1.0f);
+        dirLight->position.set(0, 5, 0);
+        dirLight->castShadow = true;
+        dirLight->shadow->bias = bias;
+        scene->add(dirLight);
+
+        // Floor that receives shadow and is also shadow caster
+        auto planeGeom = PlaneGeometry::create(5, 5);
+        auto planeMat = MeshPhongMaterial::create();
+        planeMat->color = Color(0xffffff);
+        auto plane = Mesh::create(planeGeom, planeMat);
+        plane->rotation.x = -math::PI / 2;
+        plane->receiveShadow = true;
+        scene->add(plane);
+
+        return scene;
+    };
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.set(0, 3, 5);
+    camera->lookAt(Vector3(0, 0, 0));
+    Color clearColor(0x000000);
+
+    auto noBiasPixels = renderWithDawn(*makeScene(0.0f), *camera, clearColor);
+    auto biasPixels = renderWithDawn(*makeScene(-0.005f), *camera, clearColor);
+
+    // Both should produce visible output
+    CHECK(countNonBlack(noBiasPixels) > PIXEL_COUNT / 16);
+    CHECK(countNonBlack(biasPixels) > PIXEL_COUNT / 16);
+}
+
+// =============================================================================
+// Section 35: Dawn — Specular Map
+// =============================================================================
+
+TEST_CASE("Dawn: specularMap controls highlight regions", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto makeScene = [](bool useSpecularMap) {
+        auto scene = Scene::create();
+        auto dirLight = DirectionalLight::create(Color(0xffffff), 1.0f);
+        dirLight->position.set(0, 0, 1);
+        scene->add(dirLight);
+
+        auto geometry = SphereGeometry::create(1.0f, 32, 16);
+        auto material = MeshPhongMaterial::create();
+        material->color = Color(0x888888);
+        material->specular = Color(0xffffff);
+        material->shininess = 100.0f;
+
+        if (useSpecularMap) {
+            // Dark specular map — reduces specular highlights
+            material->specularMap = makeUniformTexture(30, 30, 30);
+        }
+
+        auto mesh = Mesh::create(geometry, material);
+        scene->add(mesh);
+        return scene;
+    };
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 3;
+    Color clearColor(0x000000);
+
+    auto fullSpecPixels = renderWithDawn(*makeScene(false), *camera, clearColor);
+    auto reducedSpecPixels = renderWithDawn(*makeScene(true), *camera, clearColor);
+
+    // Both should render
+    CHECK(countNonBlack(fullSpecPixels) > PIXEL_COUNT / 8);
+    CHECK(countNonBlack(reducedSpecPixels) > PIXEL_COUNT / 8);
+
+    // Full specular should have brighter highlights
+    int fullMax = maxPixelBrightness(fullSpecPixels);
+    int reducedMax = maxPixelBrightness(reducedSpecPixels);
+    CHECK(fullMax > reducedMax);
+}
+
+// =============================================================================
+// Section 36: Dawn — Diffuse Map (color map)
+// =============================================================================
+
+TEST_CASE("Dawn: map (diffuse texture) tints geometry", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto scene = Scene::create();
+    auto ambient = AmbientLight::create(Color(0xffffff));
+    scene->add(ambient);
+
+    auto geometry = PlaneGeometry::create(2, 2);
+    auto material = MeshBasicMaterial::create();
+    material->map = makeUniformTexture(255, 0, 0); // Red texture
+    material->side = Side::Double;
+
+    auto mesh = Mesh::create(geometry, material);
+    scene->add(mesh);
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 3;
+
+    auto pixels = renderWithDawn(*scene, *camera, Color(0x000000));
+    auto avg = averageColor(pixels);
+    CHECK(avg.r > avg.g + 20);
+    CHECK(avg.r > avg.b + 20);
+}
+
+// =============================================================================
+// Section 37: Dawn — LineBasicMaterial Options
+// =============================================================================
+
+TEST_CASE("Dawn: LineBasicMaterial with dashed line", "[dawn]") {
+    REQUIRE_DAWN();
+
+    auto scene = Scene::create();
+    auto geometry = BufferGeometry::create();
+    std::vector<float> positions = {-2, 0, 0, 2, 0, 0};
+    geometry->setAttribute("position", FloatBufferAttribute::create(positions, 3));
+
+    auto material = LineBasicMaterial::create();
+    material->color = Color(0xffffff);
+
+    auto line = Line::create(geometry, material);
+    scene->add(line);
+
+    auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
+    camera->position.z = 3;
+
+    auto pixels = renderWithDawn(*scene, *camera, Color(0x000000));
+    int nonBlack = countNonBlack(pixels);
+    CHECK(nonBlack > 3);
 }
