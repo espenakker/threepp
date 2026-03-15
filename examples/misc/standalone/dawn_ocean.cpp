@@ -22,7 +22,7 @@
 
 #define STB_IMAGE_STATIC
 #define STB_IMAGE_IMPLEMENTATION
-#include "../../src/external/stb/stb_image.h"
+#include "../../../src/external/stb/stb_image.h"
 
 #include <algorithm>
 #include <chrono>
@@ -354,7 +354,7 @@ struct VsOut {
     let backgroundColor = textureSample(screenTex, screenSamp, screenUV).rgb;
 
     let surfaceDepth = in.clipPos.z;
-    let backgroundDepth = textureSample(depthTex, screenSamp, screenUV).r;
+    let backgroundDepth = textureLoad(depthTex, vec2<i32>(in.clipPos.xy), 0).r;
 
     let distanceThroughWater = max(surfaceDepth - backgroundDepth, 0.0);
 
@@ -428,7 +428,7 @@ fn getFogFactor(d: f32, rayDir: vec3<f32>) -> f32 {
     let waterColor = textureSample(waterTex, samp, in.uv);
     // Composite: if waterColor.a > 0, use water; otherwise use background
     var color = mix(bgColor.rgb, waterColor.rgb, waterColor.a);
-    let depth = textureSample(depthTex, samp, in.uv).r;
+    let depth = textureLoad(depthTex, vec2<i32>(in.pos.xy), 0).r;
     let rayDir = normalize(worldFromUV(in.uv, u.cameraInvProj, u.cameraInvView) - u.cameraPos);
     let fogFactor = getFogFactor(depth, rayDir);
     let fogColor = vec3<f32>(0.8);
@@ -516,7 +516,7 @@ WGPUSampler createSampler(WGPUDevice device, WGPUFilterMode filter = WGPUFilterM
     sd.label = sv("sampler");
     sd.magFilter = filter;
     sd.minFilter = filter;
-    sd.mipmapFilter = WGPUMipmapFilterMode_Linear;
+    sd.mipmapFilter = (filter == WGPUFilterMode_Nearest) ? WGPUMipmapFilterMode_Nearest : WGPUMipmapFilterMode_Linear;
     sd.addressModeU = addr;
     sd.addressModeV = addr;
     sd.addressModeW = addr;
@@ -761,7 +761,7 @@ struct OceanSim {
         WGPUBindGroupLayoutEntry e{};
         e.binding = binding;
         e.visibility = WGPUShaderStage_Compute;
-        e.texture.sampleType = WGPUTextureSampleType_Float;
+        e.texture.sampleType = WGPUTextureSampleType_UnfilterableFloat;
         e.texture.viewDimension = WGPUTextureViewDimension_2D;
         return e;
     }
@@ -1529,30 +1529,30 @@ struct WaterPipeline {
         entries[0].binding = 0;
         entries[0].visibility = WGPUShaderStage_Vertex | WGPUShaderStage_Fragment;
         entries[0].buffer.type = WGPUBufferBindingType_Uniform;
-        entries[0].buffer.minBindingSize = 144; // 2*mat4 + vec3 + f32 + vec3 + f32
+        entries[0].buffer.minBindingSize = 160; // 2*mat4 + vec3+pad + f32 + vec3+pad + f32 (WGSL alignment)
 
-        // 1: heightMap (sampled)
+        // 1: heightMap (Rg32Float — unfilterable)
         entries[1].binding = 1;
         entries[1].visibility = WGPUShaderStage_Vertex;
-        entries[1].texture.sampleType = WGPUTextureSampleType_Float;
+        entries[1].texture.sampleType = WGPUTextureSampleType_UnfilterableFloat;
         entries[1].texture.viewDimension = WGPUTextureViewDimension_2D;
 
-        // 2: gradientMap (sampled)
+        // 2: gradientMap (Rg32Float — unfilterable)
         entries[2].binding = 2;
         entries[2].visibility = WGPUShaderStage_Vertex;
-        entries[2].texture.sampleType = WGPUTextureSampleType_Float;
+        entries[2].texture.sampleType = WGPUTextureSampleType_UnfilterableFloat;
         entries[2].texture.viewDimension = WGPUTextureViewDimension_2D;
 
-        // 3: displacementMap (sampled)
+        // 3: displacementMap (Rg32Float — unfilterable)
         entries[3].binding = 3;
         entries[3].visibility = WGPUShaderStage_Vertex;
-        entries[3].texture.sampleType = WGPUTextureSampleType_Float;
+        entries[3].texture.sampleType = WGPUTextureSampleType_UnfilterableFloat;
         entries[3].texture.viewDimension = WGPUTextureViewDimension_2D;
 
-        // 4: ocean sampler
+        // 4: ocean sampler (non-filtering for unfilterable textures)
         entries[4].binding = 4;
         entries[4].visibility = WGPUShaderStage_Vertex;
-        entries[4].sampler.type = WGPUSamplerBindingType_Filtering;
+        entries[4].sampler.type = WGPUSamplerBindingType_NonFiltering;
 
         // 5: cubemap texture
         entries[5].binding = 5;
@@ -1876,11 +1876,11 @@ int main() {
     // --- Create Uniform Buffers ---
     WGPUBuffer skyboxUB = createBuffer(device, 80, WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst, "skybox_ub");
     WGPUBuffer groundUB = createBuffer(device, 128, WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst, "ground_ub");
-    WGPUBuffer waterUB = createBuffer(device, 144, WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst, "water_ub");
+    WGPUBuffer waterUB = createBuffer(device, 160, WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst, "water_ub");
     WGPUBuffer ppUB = createBuffer(device, 144, WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst, "pp_ub");
 
     // --- Create Samplers ---
-    WGPUSampler oceanSampler = createSampler(device, WGPUFilterMode_Linear, WGPUAddressMode_Repeat);
+    WGPUSampler oceanSampler = createSampler(device, WGPUFilterMode_Nearest, WGPUAddressMode_Repeat);
     WGPUSampler screenSampler = createSampler(device, WGPUFilterMode_Linear, WGPUAddressMode_ClampToEdge);
     WGPUSampler nearestSampler = createSampler(device, WGPUFilterMode_Nearest, WGPUAddressMode_ClampToEdge);
 
