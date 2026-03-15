@@ -17,8 +17,8 @@ namespace threepp {
 
 namespace threepp::dawn {
 
-    // pos(12) + normal(12) + uv(8) = 32 bytes per vertex
-    constexpr uint32_t VERTEX_STRIDE = 32;
+    // pos(12) + normal(12) + uv(8) + color(12) = 44 bytes per vertex
+    constexpr uint32_t VERTEX_STRIDE = 44;
 
     struct GeometryBuffers {
         WGPUBuffer vertexBuffer = nullptr;
@@ -28,6 +28,7 @@ namespace threepp::dawn {
         unsigned int positionVersion = 0;
         unsigned int normalVersion = 0;
         unsigned int uvVersion = 0;
+        unsigned int colorVersion = 0;
         unsigned int indexVersion = 0;
     };
 

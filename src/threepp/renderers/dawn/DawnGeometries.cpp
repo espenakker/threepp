@@ -18,7 +18,8 @@ std::vector<float> DawnGeometries::buildInterleavedVertexData(BufferGeometry* ge
 
     const float* normalData = nullptr;
     const float* uvData = nullptr;
-    int normalItemSize = 3, uvItemSize = 2;
+    const float* colorData = nullptr;
+    int normalItemSize = 3, uvItemSize = 2, colorItemSize = 3;
 
     if (geometry->hasAttribute("normal")) {
         auto nAttr = geometry->getAttribute<float>("normal");
@@ -30,10 +31,16 @@ std::vector<float> DawnGeometries::buildInterleavedVertexData(BufferGeometry* ge
         uvData = uvAttr->array().data();
         uvItemSize = static_cast<int>(uvAttr->itemSize());
     }
+    if (geometry->hasAttribute("color")) {
+        auto cAttr = geometry->getAttribute<float>("color");
+        colorData = cAttr->array().data();
+        colorItemSize = static_cast<int>(cAttr->itemSize());
+    }
 
-    std::vector<float> interleaved(count * 8);
+    // 11 floats per vertex: pos(3) + normal(3) + uv(2) + color(3)
+    std::vector<float> interleaved(count * 11);
     for (uint32_t i = 0; i < count; i++) {
-        size_t base = i * 8;
+        size_t base = i * 11;
         interleaved[base + 0] = posArr[i * posItemSize + 0];
         interleaved[base + 1] = posArr[i * posItemSize + 1];
         interleaved[base + 2] = (posItemSize > 2) ? posArr[i * posItemSize + 2] : 0.f;
@@ -55,6 +62,16 @@ std::vector<float> DawnGeometries::buildInterleavedVertexData(BufferGeometry* ge
             interleaved[base + 6] = 0.f;
             interleaved[base + 7] = 0.f;
         }
+
+        if (colorData) {
+            interleaved[base + 8] = colorData[i * colorItemSize + 0];
+            interleaved[base + 9] = (colorItemSize > 1) ? colorData[i * colorItemSize + 1] : 0.f;
+            interleaved[base + 10] = (colorItemSize > 2) ? colorData[i * colorItemSize + 2] : 0.f;
+        } else {
+            interleaved[base + 8] = 1.f;
+            interleaved[base + 9] = 1.f;
+            interleaved[base + 10] = 1.f;
+        }
     }
     return interleaved;
 }
@@ -66,6 +83,8 @@ void DawnGeometries::storeAttributeVersions(BufferGeometry* geometry, GeometryBu
         gb.normalVersion = geometry->getAttribute<float>("normal")->version;
     if (geometry->hasAttribute("uv"))
         gb.uvVersion = geometry->getAttribute<float>("uv")->version;
+    if (geometry->hasAttribute("color"))
+        gb.colorVersion = geometry->getAttribute<float>("color")->version;
     if (geometry->getIndex())
         gb.indexVersion = geometry->getIndex()->version;
 }
@@ -79,6 +98,9 @@ bool DawnGeometries::geometryNeedsUpdate(BufferGeometry* geometry, const Geometr
         return true;
     if (geometry->hasAttribute("uv") &&
         geometry->getAttribute<float>("uv")->version > gb.uvVersion)
+        return true;
+    if (geometry->hasAttribute("color") &&
+        geometry->getAttribute<float>("color")->version > gb.colorVersion)
         return true;
     return false;
 }
