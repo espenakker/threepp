@@ -24,6 +24,7 @@
 #include "threepp/math/Matrix4.hpp"
 #include "threepp/objects/Mesh.hpp"
 #include "threepp/objects/InstancedMesh.hpp"
+#include "threepp/objects/SkinnedMesh.hpp"
 #include "threepp/objects/Line.hpp"
 #include "threepp/objects/LineSegments.hpp"
 #include "threepp/objects/LineLoop.hpp"
@@ -92,73 +93,78 @@ namespace {
     // Bits 4-5: cull mode (00=None, 01=Front, 10=Back)
     // Bit 6: wireframe (LineList vs TriangleList)
     // Bits 7-9: blend mode (000=Normal, 001=None, 010=Additive, 011=Subtractive, 100=Multiply)
-    enum PipelineFeatures : uint32_t {
-        FEAT_NONE       = 0,
-        FEAT_TEXTURE    = 1 << 0,
-        FEAT_LIGHTING   = 1 << 1,
-        FEAT_SPECULAR   = 1 << 2,
-        FEAT_PBR        = 1 << 3,
-        FEAT_NORMAL_MAP = 1 << 10,
-    };
+    // Feature flags use uint64_t to avoid bit collisions (>32 features)
+    constexpr uint64_t FEAT_NONE       = 0;
+    constexpr uint64_t FEAT_TEXTURE    = 1ULL << 0;
+    constexpr uint64_t FEAT_LIGHTING   = 1ULL << 1;
+    constexpr uint64_t FEAT_SPECULAR   = 1ULL << 2;
+    constexpr uint64_t FEAT_PBR        = 1ULL << 3;
+    constexpr uint64_t FEAT_NORMAL_MAP = 1ULL << 10;
 
-    constexpr uint32_t CULL_SHIFT = 4;
-    constexpr uint32_t CULL_MASK  = 0x3 << CULL_SHIFT;
-    constexpr uint32_t CULL_NONE  = 0 << CULL_SHIFT;
-    constexpr uint32_t CULL_FRONT = 1 << CULL_SHIFT;
-    constexpr uint32_t CULL_BACK  = 2 << CULL_SHIFT;
+    constexpr uint64_t CULL_SHIFT = 4;
+    constexpr uint64_t CULL_MASK  = 0x3ULL << CULL_SHIFT;
+    constexpr uint64_t CULL_NONE  = 0ULL << CULL_SHIFT;
+    constexpr uint64_t CULL_FRONT = 1ULL << CULL_SHIFT;
+    constexpr uint64_t CULL_BACK  = 2ULL << CULL_SHIFT;
 
-    constexpr uint32_t WIREFRAME_BIT = 1 << 6;
+    constexpr uint64_t WIREFRAME_BIT = 1ULL << 6;
 
-    constexpr uint32_t BLEND_SHIFT      = 7;
-    constexpr uint32_t BLEND_MASK       = 0x7 << BLEND_SHIFT;
-    constexpr uint32_t BLEND_NORMAL     = 0 << BLEND_SHIFT;
-    constexpr uint32_t BLEND_DISABLED   = 1 << BLEND_SHIFT;
-    constexpr uint32_t BLEND_ADDITIVE   = 2 << BLEND_SHIFT;
-    constexpr uint32_t BLEND_SUBTRACTIVE= 3 << BLEND_SHIFT;
-    constexpr uint32_t BLEND_MULTIPLY   = 4 << BLEND_SHIFT;
+    constexpr uint64_t BLEND_SHIFT      = 7;
+    constexpr uint64_t BLEND_MASK       = 0x7ULL << BLEND_SHIFT;
+    constexpr uint64_t BLEND_NORMAL     = 0ULL << BLEND_SHIFT;
+    constexpr uint64_t BLEND_DISABLED   = 1ULL << BLEND_SHIFT;
+    constexpr uint64_t BLEND_ADDITIVE   = 2ULL << BLEND_SHIFT;
+    constexpr uint64_t BLEND_SUBTRACTIVE= 3ULL << BLEND_SHIFT;
+    constexpr uint64_t BLEND_MULTIPLY   = 4ULL << BLEND_SHIFT;
 
-    constexpr uint32_t DEPTH_WRITE_OFF  = 1 << 11;
-    constexpr uint32_t FEAT_SHADOW      = 1 << 12;
-    constexpr uint32_t FEAT_FOG_LINEAR  = 1 << 13;
-    constexpr uint32_t FEAT_FOG_EXP2    = 1 << 14;
-    constexpr uint32_t FEAT_INSTANCE_COLOR = 1 << 15;
-    constexpr uint32_t FEAT_DISPLACEMENT_MAP = 1 << 16;
-    constexpr uint32_t FEAT_MORPH_TARGETS    = 1 << 17;
+    constexpr uint64_t DEPTH_WRITE_OFF  = 1ULL << 11;
+    constexpr uint64_t FEAT_SHADOW      = 1ULL << 12;
+    constexpr uint64_t FEAT_FOG_LINEAR  = 1ULL << 13;
+    constexpr uint64_t FEAT_FOG_EXP2    = 1ULL << 14;
+    constexpr uint64_t FEAT_INSTANCE_COLOR    = 1ULL << 15;
+    constexpr uint64_t FEAT_DISPLACEMENT_MAP  = 1ULL << 16;
+    constexpr uint64_t FEAT_MORPH_TARGETS     = 1ULL << 17;
 
-    // Tone mapping mode encoded in bits 15-16
-    constexpr uint32_t TONEMAP_SHIFT    = 15;
-    constexpr uint32_t TONEMAP_MASK     = 0x7 << TONEMAP_SHIFT;
-    constexpr uint32_t TONEMAP_NONE     = 0 << TONEMAP_SHIFT;
-    constexpr uint32_t TONEMAP_LINEAR   = 1 << TONEMAP_SHIFT;
-    constexpr uint32_t TONEMAP_REINHARD = 2 << TONEMAP_SHIFT;
-    constexpr uint32_t TONEMAP_CINEON   = 3 << TONEMAP_SHIFT;
-    constexpr uint32_t TONEMAP_ACES     = 4 << TONEMAP_SHIFT;
-
-    // Topology mode (bits 18-19): 00=TriangleList, 01=LineList, 10=LineStrip, 11=PointList
-    constexpr uint32_t TOPO_SHIFT       = 18;
-    constexpr uint32_t TOPO_MASK        = 0x3 << TOPO_SHIFT;
-    constexpr uint32_t TOPO_TRIANGLE    = 0 << TOPO_SHIFT;
-    constexpr uint32_t TOPO_LINE_LIST   = 1 << TOPO_SHIFT;
-    constexpr uint32_t TOPO_LINE_STRIP  = 2 << TOPO_SHIFT;
-    constexpr uint32_t TOPO_POINT_LIST  = 3 << TOPO_SHIFT;
+    // Topology mode (bits 18-19)
+    constexpr uint64_t TOPO_SHIFT       = 18;
+    constexpr uint64_t TOPO_MASK        = 0x3ULL << TOPO_SHIFT;
+    constexpr uint64_t TOPO_TRIANGLE    = 0ULL << TOPO_SHIFT;
+    constexpr uint64_t TOPO_LINE_LIST   = 1ULL << TOPO_SHIFT;
+    constexpr uint64_t TOPO_LINE_STRIP  = 2ULL << TOPO_SHIFT;
+    constexpr uint64_t TOPO_POINT_LIST  = 3ULL << TOPO_SHIFT;
 
     // Instancing bit
-    constexpr uint32_t FEAT_INSTANCED   = 1 << 20;
+    constexpr uint64_t FEAT_INSTANCED   = 1ULL << 20;
 
     // Vertex colors bit
-    constexpr uint32_t FEAT_VERTEX_COLORS = 1 << 21;
+    constexpr uint64_t FEAT_VERTEX_COLORS = 1ULL << 21;
 
     // Additional texture map features
-    constexpr uint32_t FEAT_EMISSIVE_MAP  = 1 << 22;
-    constexpr uint32_t FEAT_ROUGHNESS_MAP = 1 << 23;
-    constexpr uint32_t FEAT_METALNESS_MAP = 1 << 24;
-    constexpr uint32_t FEAT_AO_MAP        = 1 << 25;
-    constexpr uint32_t FEAT_ALPHA_MAP     = 1 << 26;
-    constexpr uint32_t FEAT_SPECULAR_MAP  = 1 << 27;
-    constexpr uint32_t FEAT_LIGHT_MAP    = 1 << 28;
-    constexpr uint32_t FEAT_SRGB_OUTPUT  = 1 << 29;
-    constexpr uint32_t FEAT_BUMP_MAP     = 1u << 30;
-    constexpr uint32_t FEAT_GRADIENT_MAP = 1u << 31;
+    constexpr uint64_t FEAT_EMISSIVE_MAP  = 1ULL << 22;
+    constexpr uint64_t FEAT_ROUGHNESS_MAP = 1ULL << 23;
+    constexpr uint64_t FEAT_METALNESS_MAP = 1ULL << 24;
+    constexpr uint64_t FEAT_AO_MAP        = 1ULL << 25;
+    constexpr uint64_t FEAT_ALPHA_MAP     = 1ULL << 26;
+    constexpr uint64_t FEAT_SPECULAR_MAP  = 1ULL << 27;
+    constexpr uint64_t FEAT_LIGHT_MAP     = 1ULL << 28;
+    constexpr uint64_t FEAT_SRGB_OUTPUT   = 1ULL << 29;
+    constexpr uint64_t FEAT_BUMP_MAP      = 1ULL << 30;
+    constexpr uint64_t FEAT_GRADIENT_MAP  = 1ULL << 31;
+
+    // Tone mapping mode (bits 32-34) — no longer collides with bits 15-17
+    constexpr uint64_t TONEMAP_SHIFT    = 32;
+    constexpr uint64_t TONEMAP_MASK     = 0x7ULL << TONEMAP_SHIFT;
+    constexpr uint64_t TONEMAP_NONE     = 0ULL << TONEMAP_SHIFT;
+    constexpr uint64_t TONEMAP_LINEAR   = 1ULL << TONEMAP_SHIFT;
+    constexpr uint64_t TONEMAP_REINHARD = 2ULL << TONEMAP_SHIFT;
+    constexpr uint64_t TONEMAP_CINEON   = 3ULL << TONEMAP_SHIFT;
+    constexpr uint64_t TONEMAP_ACES     = 4ULL << TONEMAP_SHIFT;
+
+    // Environment map
+    constexpr uint64_t FEAT_ENV_MAP    = 1ULL << 35;
+
+    // SkinnedMesh
+    constexpr uint64_t FEAT_SKINNING   = 1ULL << 36;
 
     constexpr uint32_t SHADOW_MAP_SIZE = 1024;
     constexpr size_t SHADOW_UNIFORM_SIZE = 80; // lightVP(64) + bias(4) + normalBias(4) + padding(8)
@@ -178,7 +184,7 @@ namespace {
     constexpr size_t LIGHT_UNIFORM_SIZE = 704;
 
 
-    std::string buildWGSL(uint32_t features) {
+    std::string buildWGSL(uint64_t features) {
         std::ostringstream s;
 
         s << R"(
@@ -273,6 +279,10 @@ struct MaterialUniforms {
             s << "@group(0) @binding(30) var t_displacementMap: texture_2d<f32>;\n";
             s << "@group(0) @binding(31) var s_displacementMap: sampler;\n";
         }
+        if (features & FEAT_ENV_MAP) {
+            s << "@group(0) @binding(32) var t_envMap: texture_cube<f32>;\n";
+            s << "@group(0) @binding(33) var s_envMap: sampler;\n";
+        }
 
         if (features & FEAT_INSTANCED) {
             s << "struct InstanceData {\n";
@@ -294,6 +304,22 @@ struct MaterialUniforms {
             s << "    positions: array<vec4<f32>>,\n";     // packed morph positions
             s << "};\n";
             s << "@group(0) @binding(29) var<storage, read> morph: MorphData;\n";
+        }
+
+        if (features & FEAT_SKINNING) {
+            s << "struct SkinData {\n";
+            s << "    bindMatrix: mat4x4<f32>,\n";
+            s << "    bindMatrixInverse: mat4x4<f32>,\n";
+            s << "    boneCount: u32,\n";
+            s << "    _pad0: u32, _pad1: u32, _pad2: u32,\n";
+            s << "    bones: array<mat4x4<f32>>,\n";
+            s << "};\n";
+            s << "@group(0) @binding(34) var<storage, read> skin: SkinData;\n";
+            s << "struct SkinVertex {\n";
+            s << "    index: vec4<f32>,\n";
+            s << "    weight: vec4<f32>,\n";
+            s << "};\n";
+            s << "@group(0) @binding(35) var<storage, read> skinVertices: array<SkinVertex>;\n";
         }
 
         if (features & FEAT_SHADOW) {
@@ -338,7 +364,7 @@ struct ShadowUniforms {
         s << "\n@vertex\n";
         {
             bool needInstanceIdx = features & FEAT_INSTANCED;
-            bool needVertexIdx = features & FEAT_MORPH_TARGETS;
+            bool needVertexIdx = (features & FEAT_MORPH_TARGETS) || (features & FEAT_SKINNING);
             s << "fn vs_main(in: VertexInput";
             if (needInstanceIdx) s << ", @builtin(instance_index) iid: u32";
             if (needVertexIdx) s << ", @builtin(vertex_index) vid: u32";
@@ -370,15 +396,39 @@ struct ShadowUniforms {
         if (features & FEAT_MORPH_TARGETS) posExpr = "morphedPos";
         if (features & FEAT_DISPLACEMENT_MAP) posExpr = "displacedPos";
 
+        // Skinning: blend bone transforms per-vertex
+        if (features & FEAT_SKINNING) {
+            s << "    let sv = skinVertices[vid];\n";
+            s << "    var skinnedPos = vec4<f32>(0.0);\n";
+            s << "    var skinnedNormal = vec3<f32>(0.0);\n";
+            s << "    let bindPos = skin.bindMatrix * vec4<f32>(" << posExpr << ", 1.0);\n";
+            s << "    let bindNrm = (skin.bindMatrix * vec4<f32>(in.normal, 0.0)).xyz;\n";
+            s << "    for (var bi = 0u; bi < 4u; bi++) {\n";
+            s << "        let w = sv.weight[bi];\n";
+            s << "        if (w > 0.0) {\n";
+            s << "            let bIdx = u32(sv.index[bi]);\n";
+            s << "            let bm = skin.bones[bIdx];\n";
+            s << "            skinnedPos += (bm * bindPos) * w;\n";
+            s << "            skinnedNormal += (mat3x3<f32>(bm[0].xyz, bm[1].xyz, bm[2].xyz) * bindNrm) * w;\n";
+            s << "        }\n";
+            s << "    }\n";
+            s << "    let finalSkinPos = (skin.bindMatrixInverse * skinnedPos).xyz;\n";
+            s << "    let finalSkinNormal = normalize((skin.bindMatrixInverse * vec4<f32>(skinnedNormal, 0.0)).xyz);\n";
+            posExpr = "finalSkinPos";
+        }
+
+        std::string normalExpr = "in.normal";
+        if (features & FEAT_SKINNING) normalExpr = "finalSkinNormal";
+
         if (features & FEAT_INSTANCED) {
             s << "    let instanceModel = transform.model * instances[iid].model;\n";
             s << "    let worldPos4 = instanceModel * vec4<f32>(" << posExpr << ", 1.0);\n";
             s << "    let im3 = mat3x3<f32>(instanceModel[0].xyz, instanceModel[1].xyz, instanceModel[2].xyz);\n";
-            s << "    out.worldNormal = normalize(im3 * in.normal);\n";
+            s << "    out.worldNormal = normalize(im3 * " << normalExpr << ");\n";
         } else {
             s << "    let worldPos4 = transform.model * vec4<f32>(" << posExpr << ", 1.0);\n";
             s << "    let nm = mat3x3<f32>(transform.normalCol0.xyz, transform.normalCol1.xyz, transform.normalCol2.xyz);\n";
-            s << "    out.worldNormal = normalize(nm * in.normal);\n";
+            s << "    out.worldNormal = normalize(nm * " << normalExpr << ");\n";
         }
         s << "    out.worldPos = worldPos4.xyz;\n";
         s << "    out.uv = in.uv;\n";
@@ -615,7 +665,17 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             }
 
             if (features & FEAT_PBR) {
-                s << "    baseColor = baseColor * (1.0 - metalness) * diffuseLight + specularLight + emissiveColor;\n";
+                // Ambient specular: metallic surfaces reflect ambient light
+                s << "    let F0 = mix(vec3<f32>(0.04), baseColor, metalness);\n";
+                if (features & FEAT_ENV_MAP) {
+                    // Env map reflection: sample cube map using reflection vector (V, N already defined)
+                    s << "    let R = reflect(-V, N);\n";
+                    s << "    let envColor = textureSample(t_envMap, s_envMap, R).rgb;\n";
+                    s << "    let ambientSpecular = F0 * envColor * material.emissive.w;\n";
+                } else {
+                    s << "    let ambientSpecular = F0 * lights.ambient * (1.0 - roughness);\n";
+                }
+                s << "    baseColor = baseColor * (1.0 - metalness) * diffuseLight + specularLight + ambientSpecular + emissiveColor;\n";
             } else {
                 s << "    baseColor = baseColor * diffuseLight + specularLight + emissiveColor;\n";
             }
@@ -722,7 +782,7 @@ struct DawnRenderer::Impl {
         WGPUPipelineLayout layout = nullptr;
         WGPUBindGroupLayout bindGroupLayout = nullptr;
     };
-    std::unordered_map<uint32_t, PipelineEntry> pipelineCache;
+    std::unordered_map<uint64_t, PipelineEntry> pipelineCache;
 
     // Subsystem: shared state
     dawn::DawnState dawnState;
@@ -993,7 +1053,7 @@ struct DawnRenderer::Impl {
         wgpuSurfaceConfigure(surface, &config);
     }
 
-    PipelineEntry& getOrCreatePipeline(uint32_t features) {
+    PipelineEntry& getOrCreatePipeline(uint64_t features) {
         auto it = pipelineCache.find(features);
         if (it != pipelineCache.end()) return it->second;
 
@@ -1137,6 +1197,29 @@ struct DawnRenderer::Impl {
             { WGPUBindGroupLayoutEntry e{}; e.binding = 31;
               e.visibility = WGPUShaderStage_Vertex;
               e.sampler.type = WGPUSamplerBindingType_Filtering;
+              bglEntries.push_back(e); }
+        }
+
+        if (features & FEAT_ENV_MAP) {
+            { WGPUBindGroupLayoutEntry e{}; e.binding = 32;
+              e.visibility = WGPUShaderStage_Fragment;
+              e.texture.sampleType = WGPUTextureSampleType_Float;
+              e.texture.viewDimension = WGPUTextureViewDimension_Cube;
+              bglEntries.push_back(e); }
+            { WGPUBindGroupLayoutEntry e{}; e.binding = 33;
+              e.visibility = WGPUShaderStage_Fragment;
+              e.sampler.type = WGPUSamplerBindingType_Filtering;
+              bglEntries.push_back(e); }
+        }
+
+        if (features & FEAT_SKINNING) {
+            { WGPUBindGroupLayoutEntry e{}; e.binding = 34;
+              e.visibility = WGPUShaderStage_Vertex;
+              e.buffer.type = WGPUBufferBindingType_ReadOnlyStorage;
+              bglEntries.push_back(e); }
+            { WGPUBindGroupLayoutEntry e{}; e.binding = 35;
+              e.visibility = WGPUShaderStage_Vertex;
+              e.buffer.type = WGPUBufferBindingType_ReadOnlyStorage;
               bglEntries.push_back(e); }
         }
 
@@ -1864,7 +1947,7 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
         // Extract fog and tone mapping state from scene
         Color fogColor;
         float fogNear = 0, fogFar = 0, fogDensity = 0;
-        uint32_t fogBits = 0;
+        uint64_t fogBits = 0;
         if (sceneObj && sceneObj->fog) {
             if (auto* f = std::get_if<Fog>(&*sceneObj->fog)) {
                 fogColor = f->color;
@@ -1878,7 +1961,7 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
             }
         }
 
-        uint32_t tonemapBits = TONEMAP_NONE;
+        uint64_t tonemapBits = TONEMAP_NONE;
         switch (scope.toneMapping) {
             case ToneMapping::Linear: tonemapBits = TONEMAP_LINEAR; break;
             case ToneMapping::Reinhard: tonemapBits = TONEMAP_REINHARD; break;
@@ -1985,9 +2068,9 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
     void renderItem(WGPURenderPassEncoder pass, const RenderItem* item,
                     const Matrix4& projectionMatrix, const Matrix4& viewMatrix,
                     const Camera& camera,
-                    uint32_t fogBits, const Color& fogColor,
+                    uint64_t fogBits, const Color& fogColor,
                     float fogNear, float fogFar, float fogDensity,
-                    uint32_t tonemapBits) {
+                    uint64_t tonemapBits) {
 
         auto* object = item->object;
         auto* geometry = item->geometry;
@@ -2000,13 +2083,14 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
         bool isPoints = object->is<Points>();
         bool isLineSegments = object->is<LineSegments>();
         auto* instancedMesh = object->as<InstancedMesh>();
+        auto* skinnedMesh = object->as<SkinnedMesh>();
 
         // Geometry comes from the render item (set during collection)
         // For sprites without geometry, skip for now
         if (!geometry) return;
 
         // Determine features and extract material parameters
-        uint32_t features = FEAT_NONE;
+        uint64_t features = FEAT_NONE;
         Color diffuse(1, 1, 1);
         float opacity = rawMat->opacity;
         Color specularColor(0, 0, 0);
@@ -2025,6 +2109,8 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
         Texture* bumpMap = nullptr;
         Texture* gradientMap = nullptr;
         Texture* displacementMap = nullptr;
+        Texture* envMap = nullptr;
+        float envMapIntensity = 1.0f;
         float displacementScale = 1.0f;
         Vector2 normalScale(1, 1);
         float aoMapIntensity = 1.0f;
@@ -2048,6 +2134,7 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
             if (m->lightMap) { lightMap = m->lightMap.get(); features |= FEAT_LIGHT_MAP; }
             if (m->bumpMap) { bumpMap = m->bumpMap.get(); bumpScale = m->bumpScale; features |= FEAT_BUMP_MAP; }
             if (m->displacementMap) { displacementMap = m->displacementMap.get(); displacementScale = m->displacementScale; features |= FEAT_DISPLACEMENT_MAP; }
+            if (m->envMap) { envMap = m->envMap.get(); envMapIntensity = m->envMapIntensity; features |= FEAT_ENV_MAP; }
         } else if (auto m = dynamic_cast<MeshPhongMaterial*>(rawMat)) {
             features |= FEAT_LIGHTING | FEAT_SPECULAR;
             diffuse = m->color; specularColor = m->specular; shininess = m->shininess;
@@ -2141,6 +2228,12 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
             }
         }
 
+        // Skinning
+        if (skinnedMesh && skinnedMesh->skeleton &&
+            geometry->hasAttribute("skinIndex") && geometry->hasAttribute("skinWeight")) {
+            features |= FEAT_SKINNING;
+        }
+
         // Morph targets
         auto* morphMat = dynamic_cast<MaterialWithMorphTargets*>(rawMat);
         if (morphMat && morphMat->morphTargets && geometry->getMorphAttributes().count("position") > 0) {
@@ -2201,7 +2294,7 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
         matData[0] = diffuse.r; matData[1] = diffuse.g; matData[2] = diffuse.b; matData[3] = 1.0f;
         matData[4] = specularColor.r; matData[5] = specularColor.g; matData[6] = specularColor.b; matData[7] = shininess;
         matData[8] = roughness; matData[9] = metalness; matData[10] = opacity; matData[11] = displacementScale;
-        matData[12] = emissive.r; matData[13] = emissive.g; matData[14] = emissive.b; matData[15] = 0;
+        matData[12] = emissive.r; matData[13] = emissive.g; matData[14] = emissive.b; matData[15] = envMapIntensity;
         matData[16] = aoMapIntensity;  // flags.x: aoMapIntensity
         matData[17] = bumpScale;       // flags.y: bumpScale
         matData[18] = normalScale.x;
@@ -2274,6 +2367,12 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
         if (features & FEAT_BUMP_MAP)      addTexEntries(24, 25, bumpMap);
         if (features & FEAT_GRADIENT_MAP)  addTexEntries(26, 27, gradientMap);
         if (features & FEAT_DISPLACEMENT_MAP) addTexEntries(30, 31, displacementMap);
+
+        if (features & FEAT_ENV_MAP) {
+            auto* te = envMap ? &textures->getOrCreateCubeTexture(envMap) : &textures->getDummyCubeTexture();
+            { WGPUBindGroupEntry e{}; e.binding = 32; e.textureView = te->view; entries.push_back(e); }
+            { WGPUBindGroupEntry e{}; e.binding = 33; e.sampler = te->sampler; entries.push_back(e); }
+        }
 
         // Instance data buffer
         WGPUBuffer instanceBuffer = nullptr;
@@ -2374,6 +2473,68 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
             entries.push_back(e);
         }
 
+        // Skinning data buffers
+        WGPUBuffer skinBuffer = nullptr;
+        WGPUBuffer skinVertexBuffer = nullptr;
+        if ((features & FEAT_SKINNING) && skinnedMesh && skinnedMesh->skeleton) {
+            auto& skel = *skinnedMesh->skeleton;
+            skel.update(); // compute bone matrices
+
+            uint32_t boneCount = static_cast<uint32_t>(skel.bones.size());
+            // Layout: bindMatrix(16) + bindMatrixInverse(16) + boneCount(1 u32) + pad(3 u32) + boneMatrices(boneCount * 16)
+            size_t headerFloats = 16 + 16 + 4; // 2 matrices + 1 vec4 header
+            size_t totalFloats = headerFloats + boneCount * 16;
+            std::vector<float> skinData(totalFloats, 0.0f);
+
+            std::memcpy(skinData.data(), skinnedMesh->bindMatrix.elements.data(), 64);
+            std::memcpy(skinData.data() + 16, skinnedMesh->bindMatrixInverse.elements.data(), 64);
+            auto* u32ptr = reinterpret_cast<uint32_t*>(skinData.data() + 32);
+            u32ptr[0] = boneCount;
+            // Copy bone matrices
+            if (!skel.boneMatrices.empty()) {
+                std::memcpy(skinData.data() + headerFloats, skel.boneMatrices.data(),
+                            boneCount * 16 * sizeof(float));
+            }
+
+            size_t bufSize = totalFloats * sizeof(float);
+            WGPUBufferDescriptor bd{};
+            bd.label = {.data = "skin_data", .length = 9};
+            bd.size = bufSize;
+            bd.usage = WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst;
+            skinBuffer = wgpuDeviceCreateBuffer(device, &bd);
+            wgpuQueueWriteBuffer(queue, skinBuffer, 0, skinData.data(), bufSize);
+
+            { WGPUBindGroupEntry e{}; e.binding = 34; e.buffer = skinBuffer; e.offset = 0; e.size = bufSize;
+              entries.push_back(e); }
+
+            // Pack per-vertex skinIndex + skinWeight
+            uint32_t vertexCount = static_cast<uint32_t>(geometry->getAttribute<float>("position")->count());
+            auto* skinIdxAttr = geometry->getAttribute<float>("skinIndex");
+            auto* skinWgtAttr = geometry->getAttribute<float>("skinWeight");
+            size_t vertFloats = vertexCount * 8; // vec4 index + vec4 weight per vertex
+            std::vector<float> vertData(vertFloats, 0.0f);
+            for (uint32_t v = 0; v < vertexCount; v++) {
+                vertData[v * 8 + 0] = skinIdxAttr->getX(v);
+                vertData[v * 8 + 1] = skinIdxAttr->getY(v);
+                vertData[v * 8 + 2] = skinIdxAttr->getZ(v);
+                vertData[v * 8 + 3] = skinIdxAttr->getW(v);
+                vertData[v * 8 + 4] = skinWgtAttr->getX(v);
+                vertData[v * 8 + 5] = skinWgtAttr->getY(v);
+                vertData[v * 8 + 6] = skinWgtAttr->getZ(v);
+                vertData[v * 8 + 7] = skinWgtAttr->getW(v);
+            }
+            size_t vertBufSize = vertFloats * sizeof(float);
+            WGPUBufferDescriptor vbd{};
+            vbd.label = {.data = "skin_verts", .length = 10};
+            vbd.size = vertBufSize;
+            vbd.usage = WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst;
+            skinVertexBuffer = wgpuDeviceCreateBuffer(device, &vbd);
+            wgpuQueueWriteBuffer(queue, skinVertexBuffer, 0, vertData.data(), vertBufSize);
+
+            { WGPUBindGroupEntry e{}; e.binding = 35; e.buffer = skinVertexBuffer; e.offset = 0; e.size = vertBufSize;
+              entries.push_back(e); }
+        }
+
         WGPUBindGroupDescriptor bgDesc{};
         bgDesc.label = {.data = "obj_bg", .length = 6};
         bgDesc.layout = pe.bindGroupLayout;
@@ -2459,6 +2620,12 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
         }
         if (morphBuffer) {
             wgpuBufferRelease(morphBuffer);
+        }
+        if (skinBuffer) {
+            wgpuBufferRelease(skinBuffer);
+        }
+        if (skinVertexBuffer) {
+            wgpuBufferRelease(skinVertexBuffer);
         }
     }
 

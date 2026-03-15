@@ -29,7 +29,10 @@ namespace threepp::dawn {
 
         TextureEntry& getOrCreateTexture(Texture* tex);
 
+        TextureEntry& getOrCreateCubeTexture(Texture* tex);
+
         [[nodiscard]] const TextureEntry& getDummyTexture() const { return dummyTexture_; }
+        [[nodiscard]] const TextureEntry& getDummyCubeTexture() const { return dummyCubeTexture_; }
 
         void dispose();
 
@@ -38,7 +41,9 @@ namespace threepp::dawn {
     private:
         DawnState& state_;
         std::unordered_map<unsigned int, TextureEntry> cache_;
+        std::unordered_map<unsigned int, TextureEntry> cubeCache_;
         TextureEntry dummyTexture_;
+        TextureEntry dummyCubeTexture_;
     };
 
 }// namespace threepp::dawn
