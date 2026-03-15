@@ -19,7 +19,7 @@ namespace {
 
 }// namespace
 
-TEST_CASE("structured binding") {
+TEST_CASE("Vector3: structured binding") {
 
     Vector3 v{x, y, z};
 
@@ -30,7 +30,7 @@ TEST_CASE("structured binding") {
     CHECK(c == z);
 }
 
-TEST_CASE("add") {
+TEST_CASE("Vector3: add") {
 
     Vector3 a{x, y, z};
     Vector3 b{-x, -y, -z};
@@ -47,7 +47,7 @@ TEST_CASE("add") {
     CHECK(c.z == -2 * z);
 }
 
-TEST_CASE("sub") {
+TEST_CASE("Vector3: sub") {
 
     Vector3 a{x, y, z};
     Vector3 b{-x, -y, -z};
@@ -64,7 +64,7 @@ TEST_CASE("sub") {
     CHECK(c.z == 0);
 }
 
-TEST_CASE("dot") {
+TEST_CASE("Vector3: dot") {
 
     Vector3 a(x, y, z);
     Vector3 b(-x, -y, -z);
@@ -77,7 +77,7 @@ TEST_CASE("dot") {
     CHECK(result == 0);
 }
 
-TEST_CASE("angleTo") {
+TEST_CASE("Vector3: angleTo") {
 
     Vector3 a(0, -0.18851655680720186f, 0.9820700116639124f);
     Vector3 b(0, 0.18851655680720186f, -0.9820700116639124f);
@@ -96,7 +96,7 @@ TEST_CASE("angleTo") {
     CHECK(std::abs(_x.angleTo(Vector3(1, 1, 0)) - (math::PI / 4)) < 0.0000001);
 }
 
-TEST_CASE("clampScalar") {
+TEST_CASE("Vector3: clampScalar") {
     Vector3 a(-0.01, 0.5, 1.5);
     Vector3 clamped(0.1, 0.5, 1.0);
 
@@ -106,7 +106,7 @@ TEST_CASE("clampScalar") {
     CHECK(std::abs(a.z - clamped.z) <= 0.001);
 }
 
-TEST_CASE("from arraylike") {
+TEST_CASE("Vector3: from arraylike") {
 
     std::array<float, 3> arr{1, 2, 3};
     std::vector<float> v{arr.begin(), arr.end()};
@@ -121,7 +121,7 @@ TEST_CASE("from arraylike") {
     REQUIRE(result == Vector3{v[0], v[1], v[2]});
 }
 
-TEST_CASE("equals") {
+TEST_CASE("Vector3: equals") {
 
     Vector3 v1;
     Vector3 v2;
@@ -138,7 +138,7 @@ TEST_CASE("equals") {
     REQUIRE(v1 == v2);
 }
 
-TEST_CASE("conversion") {
+TEST_CASE("Vector3: conversion") {
 
     struct Point {
         double x;

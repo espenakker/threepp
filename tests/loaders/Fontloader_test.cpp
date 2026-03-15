@@ -5,7 +5,7 @@
 
 using namespace threepp;
 
-TEST_CASE("Test FontLoader") {
+TEST_CASE("FontLoader: Test FontLoader") {
 
     FontLoader loader;
     auto font = loader.load(std::string(DATA_FOLDER) + "/fonts/optimer_regular.typeface.json");;

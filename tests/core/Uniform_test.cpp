@@ -7,7 +7,7 @@
 using namespace threepp;
 
 
-TEST_CASE("test_Uniform") {
+TEST_CASE("Uniform: test_Uniform") {
 
     Uniform u(0.f);
     CHECK(0 == u.value<float>());

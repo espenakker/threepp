@@ -25,7 +25,7 @@ protected:
 
 class DummyProgram: public GLProgram {};
 
-TEST_CASE("init") {
+TEST_CASE("GLRenderList: init") {
 
     GLProperties properties;
     GLRenderList list(properties);
@@ -53,7 +53,7 @@ TEST_CASE("init") {
     REQUIRE(list.opaque.empty());
 }
 
-TEST_CASE("push") {
+TEST_CASE("GLRenderList: push") {
 
     GLProperties properties;
     GLRenderList list(properties);

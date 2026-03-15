@@ -14,11 +14,11 @@ using namespace threepp;
 
 namespace {
 
-    Vector3 negInf3{-Infinity<float>, -Infinity<float>, -Infinity<float>};
-    Vector3 posInf3{Infinity<float>, Infinity<float>, Infinity<float>};
-    Vector3 zero3{0, 0, 0};
-    Vector3 one3{1, 1, 1};
-    Vector3 two3{2, 2, 2};
+    const Vector3 negInf3{-Infinity<float>, -Infinity<float>, -Infinity<float>};
+    const Vector3 posInf3{Infinity<float>, Infinity<float>, Infinity<float>};
+    const Vector3 zero3{0, 0, 0};
+    const Vector3 one3{1, 1, 1};
+    const Vector3 two3{2, 2, 2};
 
     bool compareBox(const Box3& a, const Box3& b, float threshold = 0.00001f) {
 
@@ -28,7 +28,7 @@ namespace {
 
 }// namespace
 
-TEST_CASE("Instancing") {
+TEST_CASE("Box3: Instancing") {
 
     Box3 a;
     CHECK(a.min().equals(posInf3));
@@ -43,7 +43,7 @@ TEST_CASE("Instancing") {
     CHECK(c.max().equals(one3));
 }
 
-TEST_CASE("set") {
+TEST_CASE("Box3: set") {
 
     Box3 a;
 
@@ -52,7 +52,7 @@ TEST_CASE("set") {
     CHECK(a.max().equals(one3));
 }
 
-TEST_CASE("setFromArray") {
+TEST_CASE("Box3: setFromArray") {
 
     Box3 a;
 
@@ -61,7 +61,7 @@ TEST_CASE("setFromArray") {
     CHECK(a.max().equals(two3));
 }
 
-TEST_CASE("setFromBufferAttribute") {
+TEST_CASE("Box3: setFromBufferAttribute") {
 
     Box3 a(zero3, one3);
     auto bigger = FloatBufferAttribute::create({-2, -2, -2, 2, 2, 2, 1.5f, 1.5f, 1.5f, 0, 0, 0}, 3);
@@ -82,7 +82,7 @@ TEST_CASE("setFromBufferAttribute") {
     CHECK(a.max().equals(newMax));
 }
 
-TEST_CASE("setFromPoints") {
+TEST_CASE("Box3: setFromPoints") {
 
     Box3 a;
 
@@ -98,7 +98,7 @@ TEST_CASE("setFromPoints") {
     CHECK(a.isEmpty());
 }
 
-TEST_CASE("setFromCenterAndSize") {
+TEST_CASE("Box3: setFromCenterAndSize") {
 
     Box3 a(zero3, one3);
     Box3 b = a.clone();
@@ -130,7 +130,7 @@ TEST_CASE("setFromCenterAndSize") {
     CHECK(!a.equals(b));
 }
 
-TEST_CASE("getCenter") {
+TEST_CASE("Box3: getCenter") {
 
     Box3 a(zero3, zero3);
     Vector3 center;
@@ -144,7 +144,7 @@ TEST_CASE("getCenter") {
     CHECK(center.equals(midpoint));
 }
 
-TEST_CASE("getSize") {
+TEST_CASE("Box3: getSize") {
 
     Box3 a(zero3, zero3);
     Vector3 size;
@@ -157,7 +157,7 @@ TEST_CASE("getSize") {
     CHECK(size.equals(one3));
 }
 
-TEST_CASE("intersectsBox") {
+TEST_CASE("Box3: intersectsBox") {
 
     Box3 a(zero3, zero3);
     Box3 b(zero3, one3);
@@ -177,7 +177,7 @@ TEST_CASE("intersectsBox") {
     CHECK(!b.intersectsBox(c));
 }
 
-TEST_CASE("intersectSphere") {
+TEST_CASE("Box3: intersectSphere") {
 
     Box3 a(zero3, one3);
     Sphere b(zero3, 1);
@@ -188,7 +188,7 @@ TEST_CASE("intersectSphere") {
     CHECK(!a.intersectsSphere(b));
 }
 
-TEST_CASE("intersectPlane") {
+TEST_CASE("Box3: intersectPlane") {
 
     Box3 a(zero3, one3);
     Plane b(Vector3(0, 1, 0), 1);
@@ -212,7 +212,7 @@ TEST_CASE("intersectPlane") {
     CHECK(!a.intersectsPlane(j));
 }
 
-TEST_CASE("intersectTriangle") {
+TEST_CASE("Box3: intersectTriangle") {
 
     Box3 a(one3, two3);
     Triangle b(Vector3(1.5f, 1.5f, 2.5f), Vector3(2.5f, 1.5f, 1.5f), Vector3(1.5f, 2.5f, 1.5f));
@@ -228,7 +228,7 @@ TEST_CASE("intersectTriangle") {
     CHECK(!a.intersectsTriangle(f));
 }
 
-TEST_CASE("distanceToPoint") {
+TEST_CASE("Box3: distanceToPoint") {
 
     Box3 a(zero3, zero3);
     Box3 b(one3.clone().negate(), one3);
@@ -244,7 +244,7 @@ TEST_CASE("distanceToPoint") {
     CHECK_THAT(b.distanceToPoint(Vector3(-2, -2, -2)), Catch::Matchers::WithinRel(std::sqrt(3.f)));
 }
 
-TEST_CASE("getBoundingSphere") {
+TEST_CASE("Box3: getBoundingSphere") {
 
     Box3 a(zero3, zero3);
     Box3 b(zero3, one3);
@@ -259,7 +259,7 @@ TEST_CASE("getBoundingSphere") {
     CHECK(sphere.equals(Sphere(zero3, std::sqrt(12) * 0.5f)));
 }
 
-TEST_CASE("intersect") {
+TEST_CASE("Box3: intersect") {
 
     Box3 a(zero3, zero3);
     Box3 b(zero3, one3);
@@ -273,7 +273,7 @@ TEST_CASE("intersect") {
     CHECK(c.clone().intersect(c) == (c));
 }
 
-TEST_CASE("union") {
+TEST_CASE("Box3: union") {
 
     Box3 a(zero3, zero3);
     Box3 b(zero3, one3);
@@ -285,7 +285,7 @@ TEST_CASE("union") {
     CHECK(b.clone().union_(c).equals(c));
 }
 
-TEST_CASE("applyMatrix4") {
+TEST_CASE("Box3: applyMatrix4") {
 
     Box3 a(zero3, zero3);
     Box3 b(zero3, one3);
@@ -301,7 +301,7 @@ TEST_CASE("applyMatrix4") {
     CHECK(compareBox(d.clone().applyMatrix4(m), d.clone().translate(t1)));
 }
 
-TEST_CASE("translate") {
+TEST_CASE("Box3: translate") {
 
     Box3 a(zero3, zero3);
     Box3 b(zero3, one3);

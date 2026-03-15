@@ -17,14 +17,14 @@ namespace {
 
     constexpr float eps = 0.0001f;
 
-    Vector3 zero3{0, 0, 0};
-    Vector3 one3{1, 1, 1};
-    Vector3 two3{2, 2, 2};
+    const Vector3 zero3{0, 0, 0};
+    const Vector3 one3{1, 1, 1};
+    const Vector3 two3{2, 2, 2};
 
 
 }// namespace
 
-TEST_CASE("Instancing") {
+TEST_CASE("Ray: Instancing") {
 
     Ray a;
     CHECK(a.origin == (zero3));
@@ -35,7 +35,7 @@ TEST_CASE("Instancing") {
     CHECK(b.direction == (one3));
 }
 
-TEST_CASE("set") {
+TEST_CASE("Ray: set") {
 
     Ray a;
 
@@ -44,7 +44,7 @@ TEST_CASE("set") {
     CHECK(a.direction == (one3));
 }
 
-TEST_CASE("at") {
+TEST_CASE("Ray: at") {
 
     Ray a(one3, Vector3(0, 0, 1));
     Vector3 point;
@@ -57,7 +57,7 @@ TEST_CASE("at") {
     CHECK(point == (Vector3(1, 1, 2)));
 }
 
-TEST_CASE("lookAt") {
+TEST_CASE("Ray: lookAt") {
 
     Ray a(two3, one3);
     Vector3 target = one3;
@@ -67,7 +67,7 @@ TEST_CASE("lookAt") {
     CHECK(a.direction == (expected));
 }
 
-TEST_CASE("closestPointToPoint") {
+TEST_CASE("Ray: closestPointToPoint") {
 
     Ray a(one3, Vector3(0, 0, 1));
     Vector3 point;
@@ -85,7 +85,7 @@ TEST_CASE("closestPointToPoint") {
     CHECK(point == (one3));
 }
 
-TEST_CASE("distanceToPoint") {
+TEST_CASE("Ray: distanceToPoint") {
 
     Ray a(one3, Vector3(0, 0, 1));
 
@@ -102,7 +102,7 @@ TEST_CASE("distanceToPoint") {
     CHECK_THAT(d, Catch::Matchers::WithinRel(0.f));
 }
 
-TEST_CASE("distanceSqToPoint") {
+TEST_CASE("Ray: distanceSqToPoint") {
 
     Ray a(one3, Vector3(0, 0, 1));
 
@@ -119,7 +119,7 @@ TEST_CASE("distanceSqToPoint") {
     CHECK_THAT(d, Catch::Matchers::WithinRel(0.f));
 }
 
-TEST_CASE("distanceSqToSegment") {
+TEST_CASE("Ray: distanceSqToSegment") {
 
     Ray a(one3, Vector3(0, 0, 1));
     Vector3 ptOnLine;
@@ -161,7 +161,7 @@ TEST_CASE("distanceSqToSegment") {
     }
 }
 
-TEST_CASE("intersectSphere") {
+TEST_CASE("Ray: intersectSphere") {
     const float TOL = 0.0001f;
     Vector3 point;
 
@@ -229,7 +229,7 @@ TEST_CASE("intersectSphere") {
     CHECK(point.distanceTo(Vector3(0, 0, -5)) < TOL);
 }
 
-TEST_CASE("intersectsSphere") {
+TEST_CASE("Ray: intersectsSphere") {
     Ray a(one3.clone(), Vector3(0, 0, 1));
     Sphere b(zero3, 0.5);
     Sphere c(zero3, 1.5);
@@ -244,7 +244,7 @@ TEST_CASE("intersectsSphere") {
     CHECK(!a.intersectsSphere(f));
 }
 
-TEST_CASE("intersectPlane") {
+TEST_CASE("Ray: intersectPlane") {
     Ray a(one3, Vector3(0, 0, 1));
     Vector3 point;
 
@@ -274,7 +274,7 @@ TEST_CASE("intersectPlane") {
     CHECK(point.isNan());
 }
 
-TEST_CASE("intersectsPlane") {
+TEST_CASE("Ray: intersectsPlane") {
     Ray a(one3, Vector3(0, 0, 1));
 
     // parallel plane in front of the ray
@@ -298,7 +298,7 @@ TEST_CASE("intersectsPlane") {
     CHECK(!a.intersectsPlane(f));
 }
 
-TEST_CASE("intersectBox") {
+TEST_CASE("Ray: intersectBox") {
     const float TOL = 0.0001f;
 
     Box3 box(Vector3(-1, -1, -1), Vector3(1, 1, 1));
@@ -341,7 +341,7 @@ TEST_CASE("intersectBox") {
     CHECK(point.isNan());
 }
 
-TEST_CASE("intersectTriangle") {
+TEST_CASE("Ray: intersectTriangle") {
     Ray ray;
     Vector3 a(1, 1, 0);
     Vector3 b(0, 1, 1);
@@ -388,7 +388,7 @@ TEST_CASE("intersectTriangle") {
     CHECK(point.isNan());
 }
 
-TEST_CASE("applyMatrix4") {
+TEST_CASE("Ray: applyMatrix4") {
     Ray a(one3, {0, 0, 1});
     Matrix4 m;
 

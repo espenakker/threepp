@@ -21,7 +21,7 @@ namespace {
 
 }// namespace
 
-TEST_CASE("applyMatrix4") {
+TEST_CASE("Vector4: applyMatrix4") {
     auto a = Vector4(x, y, z, w);
     auto m = Matrix4().makeRotationX(math::PI);
     auto expected = Vector4(2, -3, -4, 5);
@@ -63,7 +63,7 @@ TEST_CASE("applyMatrix4") {
     CHECK(std::abs(a.w - expected.w) <= eps);
 }
 
-TEST_CASE("setFromMatrixPosition") {
+TEST_CASE("Vector4: setFromMatrixPosition") {
     auto a = Vector4();
     auto m = Matrix4().set(2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53);
 

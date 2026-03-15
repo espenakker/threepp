@@ -30,7 +30,7 @@ namespace {
 
 }// namespace
 
-TEST_CASE("Test events") {
+TEST_CASE("EventDispatcher: Test events") {
 
     EventDispatcher evt;
 

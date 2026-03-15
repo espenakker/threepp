@@ -35,7 +35,7 @@ namespace {
 
 }// namespace
 
-TEST_CASE("instancing") {
+TEST_CASE("Quaternion: instancing") {
 
     Quaternion a;
     REQUIRE(a.x == 0.f);
@@ -50,7 +50,7 @@ TEST_CASE("instancing") {
     REQUIRE(a.w == w);
 }
 
-TEST_CASE("x") {
+TEST_CASE("Quaternion: x") {
 
     Quaternion a;
     REQUIRE(a.x == 0.f);
@@ -76,7 +76,7 @@ TEST_CASE("x") {
     REQUIRE(a.x == 14.f);
 }
 
-TEST_CASE("y") {
+TEST_CASE("Quaternion: y") {
 
     Quaternion a;
     REQUIRE(a.y == 0.f);
@@ -102,7 +102,7 @@ TEST_CASE("y") {
     REQUIRE(a.y == 14.f);
 }
 
-TEST_CASE("z") {
+TEST_CASE("Quaternion: z") {
 
     Quaternion a;
     REQUIRE(a.z == 0.f);
@@ -128,7 +128,7 @@ TEST_CASE("z") {
     REQUIRE(a.z == 14.f);
 }
 
-TEST_CASE("w") {
+TEST_CASE("Quaternion: w") {
 
     Quaternion a;
     REQUIRE(a.w == 1.f);
@@ -154,7 +154,7 @@ TEST_CASE("w") {
     REQUIRE(a.w == 14.f);
 }
 
-TEST_CASE("set") {
+TEST_CASE("Quaternion: set") {
 
     Quaternion a;
     CHECK(a.x == 0.f);
@@ -169,7 +169,7 @@ TEST_CASE("set") {
     CHECK(a.w == w);
 }
 
-TEST_CASE("clone") {
+TEST_CASE("Quaternion: clone") {
 
     auto a = Quaternion().clone();
     CHECK(a.x == 0.f);
@@ -184,7 +184,7 @@ TEST_CASE("clone") {
     CHECK(b.w == w);
 }
 
-TEST_CASE("copy") {
+TEST_CASE("Quaternion: copy") {
 
     auto a = Quaternion(1, 2, 3, 4);
     auto b = Quaternion().copy(a);
@@ -202,7 +202,7 @@ TEST_CASE("copy") {
     REQUIRE(b.y == 2.f);
 }
 
-TEST_CASE("setFromEuler/setFromQuaternion") {
+TEST_CASE("Quaternion: setFromEuler/setFromQuaternion") {
 
     std::vector<Vector3> angles{Vector3(1, 0, 0), Vector3(0, 1, 0), Vector3(0, 0, 1)};
 
@@ -218,7 +218,7 @@ TEST_CASE("setFromEuler/setFromQuaternion") {
     }
 }
 
-TEST_CASE("setFromRotationMatrix") {
+TEST_CASE("Quaternion: setFromRotationMatrix") {
 
     // contrived examples purely to please the god of code coverage...
     // match conditions in various 'else [if]' blocks
@@ -245,7 +245,7 @@ TEST_CASE("setFromRotationMatrix") {
     REQUIRE(std::abs(a.w - expected.w) <= eps);
 }
 
-TEST_CASE("setFromUnitVectors") {
+TEST_CASE("Quaternion: setFromUnitVectors") {
 
     Quaternion a;
     Vector3 b(1, 0, 0);
@@ -259,7 +259,7 @@ TEST_CASE("setFromUnitVectors") {
     CHECK(std::abs(a.w - expected.w) <= eps);
 }
 
-TEST_CASE("angleTo") {
+TEST_CASE("Quaternion: angleTo") {
 
     Quaternion a;
     Quaternion b = Quaternion().setFromEuler(Euler(0, math::PI, 0));
@@ -270,7 +270,7 @@ TEST_CASE("angleTo") {
     CHECK_THAT(a.angleTo(c), Catch::Matchers::WithinRel(0.));
 }
 
-TEST_CASE("rotateTowards") {
+TEST_CASE("Quaternion: rotateTowards") {
 
     auto a = Quaternion();
     auto b = Quaternion().setFromEuler(Euler(0, math::PI, 0));
@@ -289,7 +289,7 @@ TEST_CASE("rotateTowards") {
     REQUIRE(a.angleTo(c) - halfPI <= eps);
 }
 
-TEST_CASE("identity") {
+TEST_CASE("Quaternion: identity") {
 
     auto a = Quaternion();
 
@@ -302,7 +302,7 @@ TEST_CASE("identity") {
     REQUIRE(a.w == 1.f);
 }
 
-TEST_CASE("invert/conjugate") {
+TEST_CASE("Quaternion: invert/conjugate") {
 
     Quaternion a(x, y, z, w);
 
@@ -316,7 +316,7 @@ TEST_CASE("invert/conjugate") {
     CHECK(a.w == b.w);
 }
 
-TEST_CASE("dot") {
+TEST_CASE("Quaternion: dot") {
 
     Quaternion a;
     Quaternion b;
@@ -328,7 +328,7 @@ TEST_CASE("dot") {
     CHECK_THAT(a.dot(b), Catch::Matchers::WithinRel(11.));
 }
 
-TEST_CASE("normalize/length/lengthSq") {
+TEST_CASE("Quaternion: normalize/length/lengthSq") {
 
     Quaternion a(x, y, z, w);
 
@@ -346,7 +346,7 @@ TEST_CASE("normalize/length/lengthSq") {
     CHECK(a.length() == 1);
 }
 
-TEST_CASE("premultiply") {
+TEST_CASE("Quaternion: premultiply") {
 
     Quaternion a(x, y, z, w);
     Quaternion b(2 * x, -y, -2 * z, w);
@@ -359,7 +359,7 @@ TEST_CASE("premultiply") {
     CHECK(std::abs(a.w - expected.w) <= eps);
 }
 
-TEST_CASE("slerp") {
+TEST_CASE("Quaternion: slerp") {
 
     auto a = Quaternion(x, y, z, w);
     auto b = Quaternion(-x, -y, -z, -w);
@@ -393,7 +393,7 @@ TEST_CASE("slerp") {
     REQUIRE(std::abs(result.w - expected.w) <= eps);
 }
 
-TEST_CASE("slerpQuaternions") {
+TEST_CASE("Quaternion: slerpQuaternions") {
 
     float SQRT1_2 = std::sqrt(0.5);
 

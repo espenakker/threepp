@@ -5,7 +5,7 @@
 
 using namespace threepp;
 
-TEST_CASE("Test enable") {
+TEST_CASE("Layers: Test enable") {
 
     Layers a;
 
@@ -26,7 +26,7 @@ TEST_CASE("Test enable") {
     CHECK(a.mask() == 2);
 }
 
-TEST_CASE("Test toggle") {
+TEST_CASE("Layers: Test toggle") {
 
     Layers a;
 
@@ -47,7 +47,7 @@ TEST_CASE("Test toggle") {
     CHECK(a.mask() == 0);
 }
 
-TEST_CASE("Test disable") {
+TEST_CASE("Layers: Test disable") {
 
     Layers a;
 
@@ -68,7 +68,7 @@ TEST_CASE("Test disable") {
     CHECK(a.mask() == 0);
 }
 
-TEST_CASE("Test test") {
+TEST_CASE("Layers: Test test") {
 
     Layers a;
     Layers b;
@@ -82,7 +82,7 @@ TEST_CASE("Test test") {
     CHECK(a.test(b));
 }
 
-TEST_CASE("Test isEnabled") {
+TEST_CASE("Layers: Test isEnabled") {
 
     Layers a;
 

@@ -16,7 +16,7 @@ namespace {
 
 }
 
-TEST_CASE("Instancing") {
+TEST_CASE("Cylindrical: Instancing") {
 
     Cylindrical a;
     float radius = 10.0;
@@ -33,7 +33,7 @@ TEST_CASE("Instancing") {
     CHECK_THAT(a.y(), Catch::Matchers::WithinRel(y));
 }
 
-TEST_CASE("set") {
+TEST_CASE("Cylindrical: set") {
 
     Cylindrical a;
     float radius = 10.0;
@@ -46,7 +46,7 @@ TEST_CASE("set") {
     CHECK_THAT(a.y(), Catch::Matchers::WithinRel(y));
 }
 
-TEST_CASE("setFromVector3") {
+TEST_CASE("Cylindrical: setFromVector3") {
 
     Cylindrical a(1, 1, 1);
     Vector3 b(0, 0, 0);

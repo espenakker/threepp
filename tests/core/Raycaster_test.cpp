@@ -67,7 +67,7 @@ namespace {
 }// namespace
 
 
-TEST_CASE("set") {
+TEST_CASE("Raycaster: set") {
     Vector3 origin(0, 0, 0);
     Vector3 direction(0, 0, -1);
     Raycaster a(origin.clone(), direction.clone());
@@ -83,7 +83,7 @@ TEST_CASE("set") {
     CHECK(a.ray.direction == direction);
 }
 
-TEST_CASE("setFromCamera (Perspective)") {
+TEST_CASE("Raycaster: setFromCamera (Perspective)") {
     Raycaster raycaster;
     const auto& rayDirection = raycaster.ray.direction;
     PerspectiveCamera camera(90, 1, 1, 1000);
@@ -112,7 +112,7 @@ TEST_CASE("setFromCamera (Perspective)") {
     }
 }
 
-TEST_CASE("intersectObject") {
+TEST_CASE("Raycaster: intersectObject") {
     auto raycaster = getRaycaster();
     auto objectsToCheck = getObjectsToCheck();
 
@@ -127,7 +127,7 @@ TEST_CASE("intersectObject") {
     }
 }
 
-TEST_CASE("intersectObjects") {
+TEST_CASE("Raycaster: intersectObjects") {
     auto raycaster = getRaycaster();
     auto objectsToCheck = getObjectsToCheck();
 
@@ -147,7 +147,7 @@ TEST_CASE("intersectObjects") {
     }
 }
 
-TEST_CASE("setFromCamera (Orthographic)") {
+TEST_CASE("Raycaster: setFromCamera (Orthographic)") {
     Raycaster raycaster;
     const auto& rayOrigin = raycaster.ray.origin;
     const auto& rayDirection = raycaster.ray.direction;
@@ -162,7 +162,7 @@ TEST_CASE("setFromCamera (Orthographic)") {
     CHECK(rayDirection == expectedDirection);
 }
 
-TEST_CASE("Line intersection threshold") {
+TEST_CASE("Raycaster: Line intersection threshold") {
     auto raycaster = getRaycaster();
     std::vector points{Vector3(-2, -10, -5), Vector3(-2, 10, -5)};
     auto geometry = BufferGeometry::create();
@@ -176,7 +176,7 @@ TEST_CASE("Line intersection threshold") {
     CHECK(raycaster.intersectObject(*line).size() == 1);
 }
 
-TEST_CASE("Points intersection threshold") {
+TEST_CASE("Raycaster: Points intersection threshold") {
     auto raycaster = getRaycaster();
     std::vector coordinates{Vector3(-2, 0, -5)};
     auto geometry = BufferGeometry::create();

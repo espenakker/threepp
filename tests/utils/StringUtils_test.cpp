@@ -10,7 +10,7 @@
 
 using namespace threepp;
 
-TEST_CASE("join") {
+TEST_CASE("StringUtils: join") {
 
     {
         std::string join = utils::join(std::vector<std::string>{"1", "2", "3", "4"}, ' ');
@@ -28,7 +28,7 @@ TEST_CASE("join") {
     }
 }
 
-TEST_CASE("split") {
+TEST_CASE("StringUtils: split") {
 
     std::vector<std::string> answer{"1", "2", "3", "4"};
 
@@ -44,7 +44,7 @@ TEST_CASE("split") {
 }
 
 
-TEST_CASE("trim") {
+TEST_CASE("StringUtils: trim") {
 
     {
         std::string str{"hello"};

@@ -4,7 +4,7 @@
 
 using namespace threepp::svg;
 
-TEST_CASE("parseFloats test") {
+TEST_CASE("SVGFunctions: parseFloats test") {
 
     std::string input{"200,200"};
     CHECK(parseFloats(input) == std::vector<float>{200, 200});

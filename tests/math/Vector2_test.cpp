@@ -17,7 +17,7 @@ namespace {
 
 }// namespace
 
-TEST_CASE("structured binding") {
+TEST_CASE("Vector2: structured binding") {
 
     Vector2 v{x, y};
 
@@ -27,7 +27,7 @@ TEST_CASE("structured binding") {
     CHECK(b == y);
 }
 
-TEST_CASE("add") {
+TEST_CASE("Vector2: add") {
 
     Vector2 a{x, y};
     Vector2 b{-x, -y};
@@ -42,7 +42,7 @@ TEST_CASE("add") {
     CHECK(c.y == -2 * y);
 }
 
-TEST_CASE("sub") {
+TEST_CASE("Vector2: sub") {
 
     Vector2 a{x, y};
     Vector2 b{-x, -y};
@@ -57,7 +57,7 @@ TEST_CASE("sub") {
     CHECK(c.y == 0);
 }
 
-TEST_CASE("dot") {
+TEST_CASE("Vector2: dot") {
 
     Vector2 a(x, y);
     Vector2 b(-x, -y);
@@ -70,7 +70,7 @@ TEST_CASE("dot") {
     CHECK(result == 0);
 }
 
-TEST_CASE("angleTo") {
+TEST_CASE("Vector2: angleTo") {
 
     Vector2 a(-0.18851655680720186f, 0.9820700116639124f);
     Vector2 b(0.18851655680720186f, -0.9820700116639124f);
@@ -87,7 +87,7 @@ TEST_CASE("angleTo") {
     CHECK(std::abs(_x.angleTo(Vector2(1, 1)) - (math::PI / 4)) < 0.0000001);
 }
 
-TEST_CASE("from arraylike") {
+TEST_CASE("Vector2: from arraylike") {
 
     std::array<float, 2> arr{1, 2};
     std::vector<float> v{arr.begin(), arr.end()};
@@ -102,7 +102,7 @@ TEST_CASE("from arraylike") {
     REQUIRE(result == Vector2{v[0], v[1]});
 }
 
-TEST_CASE("equals") {
+TEST_CASE("Vector2: equals") {
 
     Vector2 v1;
     Vector2 v2;
@@ -119,19 +119,19 @@ TEST_CASE("equals") {
     REQUIRE(v1 == v2);
 }
 
-TEST_CASE("Convertible to std::pair<int, int>") {
+TEST_CASE("Vector2: Convertible to std::pair<int, int>") {
     std::pair<int, int> pair = Vector2(1, 1);
     REQUIRE(pair.first == 1);
     REQUIRE(pair.second == 1);
 }
 
-TEST_CASE("Convertible to std::pair<float, float>") {
+TEST_CASE("Vector2: Convertible to std::pair<float, float>") {
     std::pair<float, float> pair = Vector2(1.1f, 1.2f);
     REQUIRE_THAT(pair.first, Catch::Matchers::WithinRel(1.1f));
     REQUIRE_THAT(pair.second, Catch::Matchers::WithinRel(1.2f));
 }
 
-TEST_CASE("Structural binding") {
+TEST_CASE("Vector2: Structural binding") {
     auto [x,y] = Vector2(1.1f, 1.2f);
     REQUIRE_THAT(x, Catch::Matchers::WithinRel(1.1f));
     REQUIRE_THAT(y, Catch::Matchers::WithinRel(1.2f));

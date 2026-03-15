@@ -18,7 +18,7 @@ namespace {
 
 }// namespace
 
-TEST_CASE("Instancing") {
+TEST_CASE("Euler: Instancing") {
 
     Euler a;
     CHECK(a.equals(eulerZero));
@@ -26,7 +26,7 @@ TEST_CASE("Instancing") {
     CHECK(!a.equals(eulerAzyx));
 }
 
-TEST_CASE("Quaternion.setFromEuler/Euler.setFromQuaternion") {
+TEST_CASE("Euler: Quaternion.setFromEuler/Euler.setFromQuaternion") {
 
     std::vector<Euler> testValues{eulerZero, eulerAxyz, eulerAzyx};
     for (const auto& v : testValues) {
@@ -39,7 +39,7 @@ TEST_CASE("Quaternion.setFromEuler/Euler.setFromQuaternion") {
     }
 }
 
-TEST_CASE("Matrix4.makeRotationFromEuler/Euler.setFromRotationMatrix") {
+TEST_CASE("Euler: Matrix4.makeRotationFromEuler/Euler.setFromRotationMatrix") {
 
     std::vector<Euler> testValues{eulerZero, eulerAxyz, eulerAzyx};
     for (const auto& v : testValues) {

@@ -17,7 +17,7 @@ namespace {
 
 }// namespace
 
-TEST_CASE("instancing") {
+TEST_CASE("Box2: instancing") {
 
     Box2 a;
     CHECK(a.getMin().equals(posInf2));
@@ -32,7 +32,7 @@ TEST_CASE("instancing") {
     CHECK(a.getMax().equals(one2));
 }
 
-TEST_CASE("set") {
+TEST_CASE("Box2: set") {
 
     Box2 a;
 
@@ -41,7 +41,7 @@ TEST_CASE("set") {
     CHECK(a.getMax().equals(one2));
 }
 
-TEST_CASE("setFromPoints") {
+TEST_CASE("Box2: setFromPoints") {
 
     Box2 a;
 
@@ -57,7 +57,7 @@ TEST_CASE("setFromPoints") {
     CHECK(a.isEmpty());
 }
 
-TEST_CASE("setFromCenterAndSize") {
+TEST_CASE("Box2: setFromCenterAndSize") {
 
     Box2 a;
 
@@ -74,7 +74,7 @@ TEST_CASE("setFromCenterAndSize") {
     CHECK(a.getMax().equals(zero2));
 }
 
-TEST_CASE("empty/makeEmpty") {
+TEST_CASE("Box2: empty/makeEmpty") {
 
     Box2 a;
 
@@ -87,7 +87,7 @@ TEST_CASE("empty/makeEmpty") {
     CHECK(a.isEmpty());
 }
 
-TEST_CASE("isEmpty") {
+TEST_CASE("Box2: isEmpty") {
 
     Box2 a(zero2, zero2);
     CHECK(!a.isEmpty());
@@ -102,7 +102,7 @@ TEST_CASE("isEmpty") {
     CHECK(a.isEmpty());
 }
 
-TEST_CASE("getCenter") {
+TEST_CASE("Box2: getCenter") {
 
     Box2 a(zero2, zero2);
     Vector2 center;
@@ -115,7 +115,7 @@ TEST_CASE("getCenter") {
     CHECK(center.equals(midpoint));
 }
 
-TEST_CASE("getSize") {
+TEST_CASE("Box2: getSize") {
 
     Box2 a = Box2(zero2, zero2);
     Vector2 size;
@@ -127,7 +127,7 @@ TEST_CASE("getSize") {
     CHECK(size.equals(one2));
 }
 
-TEST_CASE("expandByPoint") {
+TEST_CASE("Box2: expandByPoint") {
 
     Box2 a(zero2, zero2);
     Vector2 size;
@@ -148,7 +148,7 @@ TEST_CASE("expandByPoint") {
     CHECK(center.equals(zero2));
 }
 
-TEST_CASE("containsPoint") {
+TEST_CASE("Box2: containsPoint") {
     Box2 a(zero2, zero2);
 
     CHECK(a.containsPoint(zero2));
@@ -160,7 +160,7 @@ TEST_CASE("containsPoint") {
     CHECK(a.containsPoint(one2.clone().negate()));
 }
 
-TEST_CASE("intersectsBox") {
+TEST_CASE("Box2: intersectsBox") {
     Box2 a(zero2, zero2);
     Box2 b(zero2, one2);
     Box2 c(one2.clone().negate(), one2);
@@ -179,7 +179,7 @@ TEST_CASE("intersectsBox") {
     CHECK(!b.intersectsBox(c));
 }
 
-TEST_CASE("intersect") {
+TEST_CASE("Box2: intersect") {
 
     Box2 a(zero2, zero2);
     Box2 b(zero2, one2);

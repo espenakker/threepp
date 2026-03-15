@@ -10,11 +10,11 @@ using namespace threepp;
 
 namespace {
 
-    inline Vector3 unit3(1, 0, 0);
+    const Vector3 unit3(1, 0, 0);
 
 }
 
-TEST_CASE("Instancing") {
+TEST_CASE("Frustum: Instancing") {
 
     auto a = Frustum();
 
@@ -40,7 +40,7 @@ TEST_CASE("Instancing") {
     CHECK(a.planes()[5].equals(p5));
 }
 
-TEST_CASE("set") {
+TEST_CASE("Frustum: set") {
 
     auto a = Frustum();
     const auto p0 = Plane(unit3, -1);
@@ -60,7 +60,7 @@ TEST_CASE("set") {
     CHECK(a.planes()[5].equals(p5));
 }
 
-TEST_CASE("setFromProjectionMatrix/makeOrthographic/containsPoint") {
+TEST_CASE("Frustum: setFromProjectionMatrix/makeOrthographic/containsPoint") {
 
     const auto m = Matrix4().makeOrthographic(-1, 1, -1, 1, 1, 100);
     const auto a = Frustum().setFromProjectionMatrix(m);
@@ -80,7 +80,7 @@ TEST_CASE("setFromProjectionMatrix/makeOrthographic/containsPoint") {
     CHECK(!a.containsPoint(Vector3(0, 0, -101)));
 }
 
-TEST_CASE("setFromProjectionMatrix/makePerspective/containsPoint") {
+TEST_CASE("Frustum: setFromProjectionMatrix/makePerspective/containsPoint") {
 
     const auto m = Matrix4().makePerspective(-1, 1, 1, -1, 1, 100);
     const auto a = Frustum().setFromProjectionMatrix(m);
@@ -100,7 +100,7 @@ TEST_CASE("setFromProjectionMatrix/makePerspective/containsPoint") {
     CHECK(!a.containsPoint(Vector3(0, 0, -101)));
 }
 
-TEST_CASE("setFromProjectionMatrix/makePerspective/intersectsSphere") {
+TEST_CASE("Frustum: setFromProjectionMatrix/makePerspective/intersectsSphere") {
 
     const auto m = Matrix4().makePerspective(-1, 1, 1, -1, 1, 100);
     const auto a = Frustum().setFromProjectionMatrix(m);
@@ -127,7 +127,7 @@ TEST_CASE("setFromProjectionMatrix/makePerspective/intersectsSphere") {
     CHECK(a.intersectsSphere(Sphere(Vector3(0, 0, -101), 1.1f)));
 }
 
-TEST_CASE("intersectsObject") {
+TEST_CASE("Frustum: intersectsObject") {
 
     const auto m = Matrix4().makePerspective(-1, 1, 1, -1, 1, 100);
     const auto a = Frustum().setFromProjectionMatrix(m);

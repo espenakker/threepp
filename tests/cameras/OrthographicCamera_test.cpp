@@ -6,7 +6,7 @@
 
 using namespace threepp;
 
-TEST_CASE("updateProjectionMatrix") {
+TEST_CASE("OrthographicCamera: updateProjectionMatrix") {
     float left = -1, right = 1, top = 1, bottom = -1;
     float near = 1, far = 3;
     auto cam = OrthographicCamera::create(left, right, top, bottom, near, far);
@@ -14,7 +14,7 @@ TEST_CASE("updateProjectionMatrix") {
     // updateProjectionMatrix is called in constructor
     const auto& pMatrix = cam->projectionMatrix.elements;
 
-    // orthographic projection is given my the 4x4 Matrix
+    // orthographic projection is given by the 4x4 Matrix
     // 2/r-l		0			 0		-(l+r/r-l)
     //   0		2/t-b		 0		-(t+b/t-b)
     //   0			0		-2/f-n	-(f+n/f-n)

@@ -16,7 +16,7 @@
 
 using namespace threepp;
 
-TEST_CASE("determinant") {
+TEST_CASE("Matrix4: determinant") {
 
     Matrix4 a;
     REQUIRE_THAT(a.determinant(), Catch::Matchers::WithinRel(1.f));
@@ -32,7 +32,7 @@ TEST_CASE("determinant") {
     REQUIRE_THAT(a.determinant(), Catch::Matchers::WithinRel(76.f));
 }
 
-TEST_CASE("set") {
+TEST_CASE("Matrix4: set") {
     Matrix4 m;
 
     m.set(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
@@ -54,7 +54,7 @@ TEST_CASE("set") {
     REQUIRE(m.elements[15] == 15);
 }
 
-TEST_CASE("identity") {
+TEST_CASE("Matrix4: identity") {
 
     Matrix4 a;
     Matrix4 b;
@@ -84,7 +84,7 @@ TEST_CASE("identity") {
     REQUIRE(matrixEquals4(a, b));
 }
 
-TEST_CASE("copy") {
+TEST_CASE("Matrix4: copy") {
 
     auto a = Matrix4().set(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
     auto b = Matrix4().copy(a);
@@ -96,7 +96,7 @@ TEST_CASE("copy") {
     REQUIRE(!matrixEquals4(a, b));
 }
 
-TEST_CASE("setFromMatrix3") {
+TEST_CASE("Matrix4: setFromMatrix3") {
 
     auto a = Matrix3().set(
             0, 1, 2,
@@ -112,7 +112,7 @@ TEST_CASE("setFromMatrix3") {
     REQUIRE(b.equals(c));
 }
 
-TEST_CASE("copyPosition") {
+TEST_CASE("Matrix4: copyPosition") {
 
     auto a = Matrix4().set(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16);
     auto b = Matrix4().set(1, 2, 3, 0, 5, 6, 7, 0, 9, 10, 11, 0, 13, 14, 15, 16);
@@ -123,7 +123,7 @@ TEST_CASE("copyPosition") {
     REQUIRE(matrixEquals4(a, b));
 }
 
-TEST_CASE("makeRotationFromEuler/extractRotation") {
+TEST_CASE("Matrix4: makeRotationFromEuler/extractRotation") {
 
     std::vector<Euler> testValues{
             Euler(0, 0, 0, Euler::RotationOrders::XYZ),
@@ -150,7 +150,7 @@ TEST_CASE("makeRotationFromEuler/extractRotation") {
     }
 }
 
-TEST_CASE("lookat") {
+TEST_CASE("Matrix4: lookat") {
 
     Matrix4 a;
     Matrix4 expected = Matrix4().identity();
@@ -179,7 +179,7 @@ TEST_CASE("lookat") {
     REQUIRE(a == expected);
 }
 
-TEST_CASE("premultiply") {
+TEST_CASE("Matrix4: premultiply") {
 
     auto lhs = Matrix4().set(2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53);
     auto rhs = Matrix4().set(59, 61, 67, 71, 73, 79, 83, 89, 97, 101, 103, 107, 109, 113, 127, 131);
@@ -204,7 +204,7 @@ TEST_CASE("premultiply") {
     CHECK_THAT(rhs.elements[15], Catch::Matchers::WithinRel(18710.f));
 }
 
-TEST_CASE("transpose") {
+TEST_CASE("Matrix4: transpose") {
 
     Matrix4 a;
     Matrix4 b = Matrix4(a).transpose();
@@ -217,7 +217,7 @@ TEST_CASE("transpose") {
     REQUIRE(matrixEquals4(b, c));
 }
 
-TEST_CASE("multipyMatrices") {
+TEST_CASE("Matrix4: multipyMatrices") {
 
     auto lhs = Matrix4().set(2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53);
     auto rhs = Matrix4().set(59, 61, 67, 71, 73, 79, 83, 89, 97, 101, 103, 107, 109, 113, 127, 131);
@@ -243,7 +243,7 @@ TEST_CASE("multipyMatrices") {
     CHECK_THAT(ans.elements[15], Catch::Matchers::WithinRel(18710.f));
 }
 
-TEST_CASE("invert") {
+TEST_CASE("Matrix4: invert") {
 
     auto zero = Matrix4().set(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     auto identity = Matrix4();
@@ -287,7 +287,7 @@ TEST_CASE("invert") {
     }
 }
 
-TEST_CASE("scale") {
+TEST_CASE("Matrix4: scale") {
 
     auto a = Matrix4().set(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16);
     auto b = Vector3(2, 3, 4);
@@ -297,7 +297,7 @@ TEST_CASE("scale") {
     REQUIRE(matrixEquals4(a, c));
 }
 
-TEST_CASE("getMaxScaleOnAxis") {
+TEST_CASE("Matrix4: getMaxScaleOnAxis") {
 
     auto a = Matrix4().set(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16);
     auto expected = std::sqrt(3 * 3 + 7 * 7 + 11 * 11);
@@ -305,7 +305,7 @@ TEST_CASE("getMaxScaleOnAxis") {
     REQUIRE(std::abs(a.getMaxScaleOnAxis() - expected) <= eps);
 }
 
-TEST_CASE("makeScale") {
+TEST_CASE("Matrix4: makeScale") {
 
     auto a = Matrix4();
     auto c = Matrix4().set(2, 0, 0, 0, 0, 3, 0, 0, 0, 0, 4, 0, 0, 0, 0, 1);
@@ -314,7 +314,7 @@ TEST_CASE("makeScale") {
     REQUIRE(matrixEquals4(a, c));
 }
 
-TEST_CASE("makeShear") {
+TEST_CASE("Matrix4: makeShear") {
 
     auto a = Matrix4();
     auto c = Matrix4().set(1, 3, 5, 0, 1, 1, 6, 0, 2, 4, 1, 0, 0, 0, 0, 1);
@@ -323,7 +323,7 @@ TEST_CASE("makeShear") {
     REQUIRE(matrixEquals4(a, c));
 }
 
-TEST_CASE("makePerspective") {
+TEST_CASE("Matrix4: makePerspective") {
 
     auto a = Matrix4().makePerspective(-1, 1, -1, 1, 1, 100);
     auto expected = Matrix4().set(
@@ -334,7 +334,7 @@ TEST_CASE("makePerspective") {
     REQUIRE(matrixEquals4(a, expected));
 }
 
-TEST_CASE("equals") {
+TEST_CASE("Matrix4: equals") {
 
     auto a = Matrix4().set(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
     auto b = Matrix4().set(0, -1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
@@ -347,7 +347,7 @@ TEST_CASE("equals") {
     REQUIRE(b.equals(a));
 }
 
-TEST_CASE("conversions") {
+TEST_CASE("Matrix4: conversions") {
 
     Matrix4 m;
     m.setPosition(1, 2, 3);

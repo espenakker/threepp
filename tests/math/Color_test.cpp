@@ -9,7 +9,7 @@
 using namespace threepp;
 
 
-TEST_CASE("instancing") {
+TEST_CASE("Color: instancing") {
 
     // rgb ctor
     Color c(1, 1, 1);
@@ -18,7 +18,7 @@ TEST_CASE("instancing") {
     CHECK(c.b == 1);
 }
 
-TEST_CASE("set") {
+TEST_CASE("Color: set") {
 
     Color a;
     Color b(0.5, 0, 0);
@@ -32,7 +32,7 @@ TEST_CASE("set") {
     CHECK(a.equals(c));
 }
 
-TEST_CASE("setRGB") {
+TEST_CASE("Color: setRGB") {
 
     Color c;
     c.setRGB(0.3f, 0.5f, 0.7f);
@@ -41,7 +41,7 @@ TEST_CASE("setRGB") {
     CHECK_THAT(c.b, Catch::Matchers::WithinRel(0.7f));
 }
 
-TEST_CASE("setHSL") {
+TEST_CASE("Color: setHSL") {
 
     Color c;
     HSL hsl = {0, 0, 0};
@@ -53,21 +53,21 @@ TEST_CASE("setHSL") {
     CHECK_THAT(hsl.l, Catch::Matchers::WithinRel(0.25f));
 }
 
-TEST_CASE("getHex") {
+TEST_CASE("Color: getHex") {
 
     Color c = Color::red;
     auto res = c.getHex();
     CHECK(res == 0xFF0000);
 }
 
-TEST_CASE("getHexString") {
+TEST_CASE("Color: getHexString") {
 
     Color c = Color::tomato;
     auto res = c.getHexString();
     CHECK(res == "ff6347");
 }
 
-TEST_CASE("getHSL") {
+TEST_CASE("Color: getHSL") {
 
     Color c = 0x80ffff;
     HSL hsl = {0, 0, 0};
@@ -78,14 +78,14 @@ TEST_CASE("getHSL") {
     CHECK_THAT((std::round(hsl.l * 100) / 100), Catch::Matchers::WithinRel(0.75));
 }
 
-TEST_CASE("getStyle") {
+TEST_CASE("Color: getStyle") {
 
     Color c = Color::plum;
     auto res = c.getStyle();
     CHECK(res == "rgb(221,160,221)");
 }
 
-TEST_CASE("add") {
+TEST_CASE("Color: add") {
 
     Color a = 0x0000FF;
     Color b = 0xFF0000;
@@ -96,7 +96,7 @@ TEST_CASE("add") {
     CHECK(a.equals(c));
 }
 
-TEST_CASE("addColors") {
+TEST_CASE("Color: addColors") {
 
     Color a = 0x0000FF;
     Color b = 0xFF0000;
@@ -108,7 +108,7 @@ TEST_CASE("addColors") {
     CHECK(d.equals(c));
 }
 
-TEST_CASE("multiply") {
+TEST_CASE("Color: multiply") {
 
     Color a(1, 0, 0.5f);
     Color b(0.5f, 1, 0.5f);
@@ -118,7 +118,7 @@ TEST_CASE("multiply") {
     CHECK(a.equals(c));
 }
 
-TEST_CASE("lerp") {
+TEST_CASE("Color: lerp") {
 
     Color c;
     Color c2;
@@ -129,7 +129,7 @@ TEST_CASE("lerp") {
     CHECK_THAT(c.b, Catch::Matchers::WithinRel(0.2f));
 }
 
-TEST_CASE("setStyleRGBed") {
+TEST_CASE("Color: setStyleRGBed") {
 
     Color c;
     c.setStyle("rgb(255,0,0)");
@@ -138,7 +138,7 @@ TEST_CASE("setStyleRGBed") {
     CHECK(c.b == 0);
 }
 
-TEST_CASE("setStyleRGBAed") {
+TEST_CASE("Color: setStyleRGBAed") {
 
     Color c;
     c.setStyle("rgb(255,0,0,0.5)");
@@ -147,7 +147,7 @@ TEST_CASE("setStyleRGBAed") {
     CHECK(c.b == 0);
 }
 
-TEST_CASE("setStyleRGBedWithSpaces") {
+TEST_CASE("Color: setStyleRGBedWithSpaces") {
 
     Color c;
     c.setStyle("rgb( 255, 0, 0)");
@@ -156,7 +156,7 @@ TEST_CASE("setStyleRGBedWithSpaces") {
     CHECK(c.b == 0);
 }
 
-TEST_CASE("setStyleRGBAedWithSpaces") {
+TEST_CASE("Color: setStyleRGBAedWithSpaces") {
 
     Color c;
     c.setStyle("rgb( 255, 0, 0, 0.5)");
@@ -165,7 +165,7 @@ TEST_CASE("setStyleRGBAedWithSpaces") {
     CHECK(c.b == 0);
 }
 
-TEST_CASE("setStyleRGBedPercent") {
+TEST_CASE("Color: setStyleRGBedPercent") {
 
     Color c;
     c.setStyle("rgb(100%,50%,10%)");
@@ -174,7 +174,7 @@ TEST_CASE("setStyleRGBedPercent") {
     CHECK_THAT(c.b, Catch::Matchers::WithinRel(0.1f));
 }
 
-TEST_CASE("setStyleRGBedPercentWithSpaces") {
+TEST_CASE("Color: setStyleRGBedPercentWithSpaces") {
 
     Color c;
     c.setStyle("rgb( 100%, 50%, 10%)");
@@ -183,7 +183,7 @@ TEST_CASE("setStyleRGBedPercentWithSpaces") {
     CHECK_THAT(c.b, Catch::Matchers::WithinRel(0.1f));
 }
 
-TEST_CASE("setStyleRGBAedPercentWithSpaces") {
+TEST_CASE("Color: setStyleRGBAedPercentWithSpaces") {
 
     Color c;
     c.setStyle("rgb( 100%, 50%, 10%, 0.5)");
@@ -192,7 +192,7 @@ TEST_CASE("setStyleRGBAedPercentWithSpaces") {
     CHECK_THAT(c.b, Catch::Matchers::WithinRel(0.1f));
 }
 
-TEST_CASE("setStyleHSLRed") {
+TEST_CASE("Color: setStyleHSLRed") {
 
     Color c;
     c.setStyle("hsl(360,100%,50%)");
@@ -201,35 +201,35 @@ TEST_CASE("setStyleHSLRed") {
     CHECK_THAT(c.b, Catch::Matchers::WithinAbs(0.f, 0.001f));
 }
 
-TEST_CASE("setStyleHexSkyBlue") {
+TEST_CASE("Color: setStyleHexSkyBlue") {
 
     Color c;
     c.setStyle("#87CEEB");
     CHECK(c.getHex() == 0x87CEEB);
 }
 
-TEST_CASE("setStyleHexSkyBlueMixed") {
+TEST_CASE("Color: setStyleHexSkyBlueMixed") {
 
     Color c;
     c.setStyle("#87cEeB");
     CHECK(c.getHex() == 0x87CEEB);
 }
 
-TEST_CASE("setStyleHex2Olive") {
+TEST_CASE("Color: setStyleHex2Olive") {
 
     Color c;
     c.setStyle("#F00");
     CHECK(c.getHex() == 0xFF0000);
 }
 
-TEST_CASE("setStyleHex2OliveMixed") {
+TEST_CASE("Color: setStyleHex2OliveMixed") {
 
     Color c;
     c.setStyle("#f00");
     CHECK(c.getHex() == 0xFF0000);
 }
 
-TEST_CASE("setStyleColorName") {
+TEST_CASE("Color: setStyleColorName") {
 
     Color c;
     c.setStyle("powderblue");

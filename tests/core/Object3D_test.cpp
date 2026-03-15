@@ -16,7 +16,7 @@
 using namespace threepp;
 
 
-TEST_CASE("applyMatrix4") {
+TEST_CASE("Object3D: applyMatrix4") {
 
     float x = 1;
     float y = 2;
@@ -35,11 +35,12 @@ TEST_CASE("applyMatrix4") {
     REQUIRE(a->position == expectedPos);
     auto result = std::abs(a->quaternion.x - expectedQuat.x) <= eps &&
                   std::abs(a->quaternion.y - expectedQuat.y) <= eps &&
-                  std::abs(a->quaternion.z - expectedQuat.z) <= eps;
+                  std::abs(a->quaternion.z - expectedQuat.z) <= eps &&
+                  std::abs(a->quaternion.w - expectedQuat.w) <= eps;
     REQUIRE(result);
 }
 
-TEST_CASE("applyQuaternion") {
+TEST_CASE("Object3D: applyQuaternion") {
 
     auto a = Object3D::create();
     auto sqrt = 0.5f * static_cast<float>(std::sqrt(2));
@@ -51,11 +52,12 @@ TEST_CASE("applyQuaternion") {
 
     auto result = std::abs(a->quaternion.x - expected.x) <= eps &&
                   std::abs(a->quaternion.y - expected.y) <= eps &&
-                  std::abs(a->quaternion.z - expected.z) <= eps;
+                  std::abs(a->quaternion.z - expected.z) <= eps &&
+                  std::abs(a->quaternion.w - expected.w) <= eps;
     REQUIRE(result);
 }
 
-TEST_CASE("localToWorld") {
+TEST_CASE("Object3D: localToWorld") {
 
     auto v = Vector3();
     const auto expectedPosition = Vector3(5, -1, -4);
@@ -82,7 +84,7 @@ TEST_CASE("localToWorld") {
     REQUIRE(result);
 }
 
-TEST_CASE("worldToLocal") {
+TEST_CASE("Object3D: worldToLocal") {
 
     auto v = Vector3();
     const auto expectedPosition = Vector3(-1, 0.5, -1);
@@ -109,7 +111,7 @@ TEST_CASE("worldToLocal") {
     REQUIRE(result);
 }
 
-TEST_CASE("lookAt") {
+TEST_CASE("Object3D: lookAt") {
 
     auto obj = Object3D::create();
     obj->lookAt(Vector3(0, -1, 1));
@@ -117,7 +119,7 @@ TEST_CASE("lookAt") {
     REQUIRE_THAT(obj->rotation.x * math::RAD2DEG, Catch::Matchers::WithinRel(45.f));
 }
 
-TEST_CASE("getWorldPosition") {
+TEST_CASE("Object3D: getWorldPosition") {
 
     float x = 1;
     float y = 2;
@@ -148,7 +150,7 @@ TEST_CASE("getWorldPosition") {
     REQUIRE(position == expectedChild);
 }
 
-TEST_CASE("getWorldScale") {
+TEST_CASE("Object3D: getWorldScale") {
 
     float x = 1;
     float y = 2;
@@ -165,7 +167,7 @@ TEST_CASE("getWorldScale") {
     REQUIRE(scale == expected);
 }
 
-TEST_CASE("updateMatrixWorld") {
+TEST_CASE("Object3D: updateMatrixWorld") {
 
     auto parent = Object3D::create();
     auto child = Object3D::create();
@@ -320,7 +322,7 @@ TEST_CASE("updateMatrixWorld") {
                                                                   4, 5, 6, 1});
 }
 
-TEST_CASE("updateWorldMatrix") {
+TEST_CASE("Object3D: updateWorldMatrix") {
 
     auto object = Object3D::create();
     auto parent = Object3D::create();

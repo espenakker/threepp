@@ -8,7 +8,7 @@
 using namespace threepp;
 
 
-TEST_CASE("TaskManager") {
+TEST_CASE("TaskManager: TaskManager") {
 
     TaskManager manager;
 
@@ -20,7 +20,7 @@ TEST_CASE("TaskManager") {
     REQUIRE(task1);
 }
 
-TEST_CASE("Timed task") {
+TEST_CASE("TaskManager: Timed task") {
 
     TaskManager manager;
 
@@ -33,7 +33,7 @@ TEST_CASE("Timed task") {
     REQUIRE(task);
 }
 
-TEST_CASE("Nested tasks") {
+TEST_CASE("TaskManager: Nested tasks") {
 
     TaskManager manager;
 
@@ -67,7 +67,7 @@ TEST_CASE("Nested tasks") {
     REQUIRE(task4);
 }
 
-TEST_CASE("Threaded") {
+TEST_CASE("TaskManager: Threaded") {
 
     TaskManager manager;
 

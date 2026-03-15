@@ -10,7 +10,7 @@
 using namespace threepp;
 
 
-TEST_CASE("Instancing") {
+TEST_CASE("Spherical: Instancing") {
 
     auto a = Spherical();
     CHECK(a.radius == 1.f);
@@ -27,7 +27,7 @@ TEST_CASE("Instancing") {
     CHECK(b.theta == theta);
 }
 
-TEST_CASE("set") {
+TEST_CASE("Spherical: set") {
 
     auto a = Spherical();
     float radius = 10.0f;
@@ -40,7 +40,7 @@ TEST_CASE("set") {
     CHECK(a.theta == theta);
 }
 
-TEST_CASE("makeSafe") {
+TEST_CASE("Spherical: makeSafe") {
 
     float EPS = 0.000001f;// from source
     float tooLow = 0.0f;
@@ -60,7 +60,7 @@ TEST_CASE("makeSafe") {
     CHECK(a.phi == justRight);
 }
 
-TEST_CASE("setFromVector3") {
+TEST_CASE("Spherical: setFromVector3") {
 
     float eps = 0.0001f;
 

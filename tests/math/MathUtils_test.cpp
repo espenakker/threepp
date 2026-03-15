@@ -9,7 +9,7 @@
 
 using namespace threepp;
 
-TEST_CASE("genereteUUID") {
+TEST_CASE("MathUtils: genereteUUID") {
 
     const auto uuid = math::generateUUID();
     const std::regex uuidRegex("[A-Z0-9]{8}-[A-Z0-9]{4}-4[A-Z0-9]{3}-[A-Z0-9]{4}-[A-Z0-9]{12}", std::regex_constants::icase);
@@ -17,7 +17,7 @@ TEST_CASE("genereteUUID") {
     REQUIRE(std::regex_match(uuid, uuidRegex));
 }
 
-TEST_CASE("euclideanModulo") {
+TEST_CASE("MathUtils: euclideanModulo") {
     CHECK(std::isnan(math::euclideanModulo(6, 0)));
     CHECK(math::euclideanModulo(6, 1) == Catch::Approx(0.));
     CHECK(math::euclideanModulo(6, 2) == Catch::Approx(0.));
@@ -26,7 +26,7 @@ TEST_CASE("euclideanModulo") {
     CHECK(math::euclideanModulo(6, 7) == Catch::Approx(6.));
 }
 
-TEST_CASE("mapLinear") {
+TEST_CASE("MathUtils: mapLinear") {
     // Value within range
     CHECK(math::mapLinear(0.5, 0.0, 1.0, 0.0, 10.0) == Catch::Approx(5.0));
 
@@ -37,7 +37,7 @@ TEST_CASE("mapLinear") {
     CHECK(math::mapLinear(1.0, 0.0, 1.0, 0.0, 10.0) == Catch::Approx(10.0));
 }
 
-TEST_CASE("inverseLerp") {
+TEST_CASE("MathUtils: inverseLerp") {
 
     // 50% Percentage
     CHECK(math::inverseLerp(1.0, 2.0, 1.5) == Catch::Approx(0.5));
@@ -49,7 +49,7 @@ TEST_CASE("inverseLerp") {
     CHECK(math::inverseLerp(1.0, 1.0, 1.0) == Catch::Approx(0.));
 }
 
-TEST_CASE("lerp") {
+TEST_CASE("MathUtils: lerp") {
     // Value equal to lower boundary
     CHECK(math::lerp(1.0, 2.0, 0.0) == Catch::Approx(1.0));
 

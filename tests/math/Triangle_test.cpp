@@ -6,7 +6,7 @@
 
 using namespace threepp;
 
-TEST_CASE("getArea") {
+TEST_CASE("Triangle: getArea") {
     Triangle a;
 
     CHECK_THAT( a.getArea(), Catch::Matchers::WithinRel(0.));
@@ -22,7 +22,7 @@ TEST_CASE("getArea") {
     CHECK_THAT( a.getArea(), Catch::Matchers::WithinRel(0.));
 }
 
-TEST_CASE("getMidpoint") {
+TEST_CASE("Triangle: getMidpoint") {
     Triangle a;
     Vector3 midpoint;
 
