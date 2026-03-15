@@ -18,6 +18,8 @@
 #include "threepp/materials/MeshToonMaterial.hpp"
 #include "threepp/materials/LineBasicMaterial.hpp"
 #include "threepp/materials/PointsMaterial.hpp"
+#include "threepp/materials/ShaderMaterial.hpp"
+#include "threepp/materials/ShadowMaterial.hpp"
 #include "threepp/materials/SpriteMaterial.hpp"
 #include "threepp/materials/interfaces.hpp"
 #include "threepp/math/Matrix3.hpp"
@@ -2169,6 +2171,28 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
         } else if (auto m = dynamic_cast<PointsMaterial*>(rawMat)) {
             diffuse = m->color;
             if (m->map) { diffuseMap = m->map.get(); features |= FEAT_TEXTURE; }
+        } else if (dynamic_cast<ShadowMaterial*>(rawMat)) {
+            // ShadowMaterial: without proper shadow support on this material,
+            // skip rendering entirely. In Three.js, ShadowMaterial's alpha comes
+            // from the shadow factor; without it, the material should be invisible.
+            return;
+        } else if (auto m = dynamic_cast<ShaderMaterial*>(rawMat)) {
+            // Basic ShaderMaterial support: extract color from uniforms if available
+            if (m->uniforms.count("uColor") && m->uniforms.at("uColor").hasValue()) {
+                try {
+                    auto& val = const_cast<Uniform&>(m->uniforms.at("uColor")).value();
+                    if (auto* c = std::get_if<Color>(&val)) {
+                        diffuse = *c;
+                    }
+                } catch (...) {}
+            } else if (m->uniforms.count("color") && m->uniforms.at("color").hasValue()) {
+                try {
+                    auto& val = const_cast<Uniform&>(m->uniforms.at("color")).value();
+                    if (auto* c = std::get_if<Color>(&val)) {
+                        diffuse = *c;
+                    }
+                } catch (...) {}
+            }
         } else if (auto cm = dynamic_cast<MaterialWithColor*>(rawMat)) {
             diffuse = cm->color;
         }
@@ -2243,8 +2267,9 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
             }
         }
 
-        // Shadow (mesh objects only)
-        if (isMesh && shadowState.active && object->receiveShadow) {
+        // Shadow (mesh objects with lighting only — shadow code is inside the lighting block)
+        if (isMesh && shadowState.active && object->receiveShadow &&
+            (features & (FEAT_LIGHTING | FEAT_SPECULAR | FEAT_PBR))) {
             features |= FEAT_SHADOW;
         }
 
