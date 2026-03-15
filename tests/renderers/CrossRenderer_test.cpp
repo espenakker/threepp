@@ -362,6 +362,35 @@ namespace {
         return variance / count;
     }
 
+    // Count pixels whose RGB values all fall within specified ranges
+    int countPixelsInRange(const std::vector<unsigned char>& pixels,
+                           int rMin, int rMax, int gMin, int gMax, int bMin, int bMax) {
+        int count = static_cast<int>(pixels.size()) / 3;
+        int matched = 0;
+        for (int i = 0; i < count; i++) {
+            int r = pixels[i * 3], g = pixels[i * 3 + 1], b = pixels[i * 3 + 2];
+            if (r >= rMin && r <= rMax && g >= gMin && g <= gMax && b >= bMin && b <= bMax)
+                matched++;
+        }
+        return matched;
+    }
+
+    // Average color in a rectangular region
+    AvgColor avgRegion(const std::vector<unsigned char>& px, int w, int /*h*/,
+                       int x0, int x1, int y0, int y1) {
+        double r = 0, g = 0, b = 0;
+        int count = 0;
+        for (int y = y0; y < y1; y++) {
+            for (int x = x0; x < x1; x++) {
+                int i = (y * w + x) * 3;
+                r += px[i]; g += px[i + 1]; b += px[i + 2];
+                count++;
+            }
+        }
+        if (count == 0) return {0, 0, 0};
+        return {r / count, g / count, b / count};
+    }
+
 }// namespace
 
 #define REQUIRE_DAWN() do { if (!isDawnAvailable()) SKIP("No GPU backend available for Dawn"); } while(0)
@@ -781,25 +810,13 @@ TEST_CASE("Cross: multiple objects render with correct colors", "[dawn]") {
     camera->position.z = 4;
     Color clearColor(0x000000);
 
-    auto avgRegion = [](const std::vector<unsigned char>& px, int w, int h, int x0, int x1) {
-        double r = 0, g = 0, b = 0;
-        int count = 0;
-        for (int y = h / 4; y < 3 * h / 4; y++) {
-            for (int x = x0; x < x1; x++) {
-                int i = (y * w + x) * 3;
-                r += px[i]; g += px[i + 1]; b += px[i + 2];
-                count++;
-            }
-        }
-        return AvgColor{r / count, g / count, b / count};
-    };
-
     int q1 = RT_WIDTH / 4, mid = RT_WIDTH / 2, q3 = 3 * RT_WIDTH / 4;
+    int yTop = RT_HEIGHT / 4, yBot = 3 * RT_HEIGHT / 4;
 
     // GL reference (fresh scene)
     auto glPixels = renderWithGL(*makeScene(), *camera, clearColor);
-    auto glLeftQ = avgRegion(glPixels, RT_WIDTH, RT_HEIGHT, q1, mid);
-    auto glRightQ = avgRegion(glPixels, RT_WIDTH, RT_HEIGHT, mid, q3);
+    auto glLeftQ = avgRegion(glPixels, RT_WIDTH, RT_HEIGHT, q1, mid, yTop, yBot);
+    auto glRightQ = avgRegion(glPixels, RT_WIDTH, RT_HEIGHT, mid, q3, yTop, yBot);
     CHECK(glLeftQ.r > glLeftQ.b);
     CHECK(glRightQ.b > glRightQ.r);
 
@@ -3677,6 +3694,9 @@ TEST_CASE("Dawn: roughnessMap affects specular highlights", "[dawn]") {
     // Verify both render visible geometry (roughnessMap doesn't break rendering)
     CHECK(countNonBlack(noMapPixels) > PIXEL_COUNT / 8);
     CHECK(countNonBlack(mapPixels) > PIXEL_COUNT / 8);
+
+    // Lower roughness (from map) should produce a tighter, brighter specular highlight
+    CHECK(maxPixelBrightness(mapPixels) > maxPixelBrightness(noMapPixels));
 }
 
 // DawnRenderer: metalnessMap not yet sampled in shader
@@ -3982,8 +4002,8 @@ TEST_CASE("Dawn: displacementMap offsets vertices", "[dawn]") {
     int displacedCount = countNonBlack(displacedPixels);
     CHECK(normalCount > PIXEL_COUNT / 8);
     CHECK(displacedCount > PIXEL_COUNT / 8);
-    // Displacement should change the coverage or brightness
-    CHECK(std::abs(normalCount - displacedCount) > 0);
+    // Outward displacement should increase visible coverage
+    CHECK(displacedCount > normalCount);
 }
 
 // =============================================================================
@@ -4075,10 +4095,10 @@ TEST_CASE("Dawn: bumpMap perturbs surface shading", "[dawn]") {
     CHECK(countNonBlack(flatPixels) > 0);
     CHECK(countNonBlack(bumpPixels) > 0);
 
-    // Bump map should change the brightness variance (more surface detail)
+    // Bump map introduces surface detail — should increase brightness variance
     double flatVar = brightnessVariance(flatPixels);
     double bumpVar = brightnessVariance(bumpPixels);
-    CHECK(bumpVar != flatVar);
+    CHECK(bumpVar > flatVar);
 }
 
 // =============================================================================
@@ -4120,8 +4140,14 @@ TEST_CASE("Dawn: gradientMap controls toon shading bands", "[dawn]") {
     CHECK(countNonBlack(defaultPixels) > PIXEL_COUNT / 8);
     CHECK(countNonBlack(gradientPixels) > PIXEL_COUNT / 8);
 
-    // Different gradient maps should produce different brightness
-    CHECK(std::abs(avgBrightness(defaultPixels) - avgBrightness(gradientPixels)) > 0.5);
+    // Toon shading with gradient map should produce lower brightness variance
+    // (quantized bands vs smooth gradient)
+    double defaultVar = brightnessVariance(defaultPixels);
+    double gradientVar = brightnessVariance(gradientPixels);
+    CHECK(defaultVar > gradientVar);
+
+    // Brightness should differ by more than noise
+    CHECK(std::abs(avgBrightness(defaultPixels) - avgBrightness(gradientPixels)) > 3.0);
 }
 
 // =============================================================================
@@ -4173,9 +4199,11 @@ TEST_CASE("Dawn: envMap adds reflections to standard material", "[dawn]") {
     CHECK(countNonBlack(noEnvPixels) > PIXEL_COUNT / 16);
     CHECK(countNonBlack(envPixels) > PIXEL_COUNT / 16);
 
-    // Env map on a metallic surface should make it brighter/more colored
+    // Env map should add significant brightness to a metallic surface
+    auto noEnvAvg = averageColor(noEnvPixels);
     auto envAvg = averageColor(envPixels);
-    CHECK(envAvg.r > 5.0); // Should pick up red from env map
+    CHECK(envAvg.r > noEnvAvg.r + 10.0);  // Red env map should boost red channel
+    CHECK(avgBrightness(envPixels) > avgBrightness(noEnvPixels) + 5.0);
 }
 
 // DawnRenderer: envMap / CubeTexture not yet implemented
@@ -4318,8 +4346,8 @@ TEST_CASE("Cross: morph targets produce similar deformation", "[dawn]") {
     CHECK(dawnCount > 0);
 
     double ratio = static_cast<double>(glCount) / dawnCount;
-    CHECK(ratio > 0.5);
-    CHECK(ratio < 2.0);
+    CHECK(ratio > 0.7);
+    CHECK(ratio < 1.5);
 }
 
 // =============================================================================
@@ -4379,7 +4407,8 @@ TEST_CASE("Dawn: SkinnedMesh with skeleton renders correctly", "[dawn]") {
 
     auto pixels = renderWithDawn(*scene, *camera, Color(0x000000));
     int nonBlack = countNonBlack(pixels);
-    CHECK(nonBlack > 0);
+    // A cylinder at z=4 should cover a reasonable portion of the viewport
+    CHECK(nonBlack > PIXEL_COUNT / 16);
 }
 
 // DawnRenderer: SkinnedMesh / skeletal animation not yet implemented
@@ -4438,15 +4467,15 @@ TEST_CASE("Dawn: SkinnedMesh bone rotation deforms mesh", "[dawn]") {
     auto straightPixels = renderWithDawn(*makeScene(0.0f), *camera, clearColor);
     auto bentPixels = renderWithDawn(*makeScene(math::PI / 4), *camera, clearColor);
 
-    // Both should render visible geometry
-    CHECK(countNonBlack(straightPixels) > 0);
-    CHECK(countNonBlack(bentPixels) > 0);
+    // Both should render reasonable coverage
+    CHECK(countNonBlack(straightPixels) > PIXEL_COUNT / 16);
+    CHECK(countNonBlack(bentPixels) > PIXEL_COUNT / 16);
 
     // Bent mesh should have different pixel distribution
     double straightX = avgXPosition(straightPixels, RT_WIDTH, RT_HEIGHT);
     double bentX = avgXPosition(bentPixels, RT_WIDTH, RT_HEIGHT);
-    // Rotation should shift average X position
-    CHECK(std::abs(straightX - bentX) > 0.5);
+    // A 45-degree Z-rotation should shift average X position by more than 1 pixel
+    CHECK(std::abs(straightX - bentX) > 1.0);
 }
 
 // =============================================================================
@@ -4572,8 +4601,8 @@ TEST_CASE("Cross: clipping plane produces similar cut", "[dawn]") {
         CHECK(dawnCount > PIXEL_COUNT / 16);
 
         double ratio = static_cast<double>(glCount) / dawnCount;
-        CHECK(ratio > 0.5);
-        CHECK(ratio < 2.0);
+        CHECK(ratio > 0.7);
+        CHECK(ratio < 1.5);
     }
 }
 
@@ -4964,6 +4993,9 @@ TEST_CASE("Dawn: specularMap controls highlight regions", "[dawn]") {
     // Both should render visible geometry
     CHECK(countNonBlack(fullSpecPixels) > PIXEL_COUNT / 8);
     CHECK(countNonBlack(reducedSpecPixels) > PIXEL_COUNT / 8);
+
+    // Dark specular map should reduce the peak brightness (less specular reflection)
+    CHECK(maxPixelBrightness(fullSpecPixels) > maxPixelBrightness(reducedSpecPixels));
 }
 
 // =============================================================================
