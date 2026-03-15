@@ -15,7 +15,14 @@
       "Bash(ctest:*)",
       "Bash(timeout 8 build/bin/Release/webtide.exe:*)",
       "Bash(RUST_BACKTRACE=1 ./build/bin/Release/webtide.exe:*)",
-      "Bash(RUST_BACKTRACE=1 timeout 10 ./build/bin/Release/webtide.exe:*)"
+      "Bash(RUST_BACKTRACE=1 timeout 10 ./build/bin/Release/webtide.exe:*)",
+      "Bash(timeout 10 ./build/bin/Release/webtide.exe:*)",
+      "Bash(timeout 10 ./build/bin/Release/dawn_ocean.exe:*)",
+      "Bash(./bin/Release/CrossRenderer_test.exe GL: InstancedMesh renders multiple instances:*)",
+      "Bash(timeout 8 ./build/bin/Release/webtide.exe:*)",
+      "Bash(timeout 5 ./build/bin/Release/webtide.exe:*)",
+      "Bash(timeout 3 ./build/bin/Release/webtide.exe:*)",
+      "Bash(powershell:*)"
     ]
   }
 }

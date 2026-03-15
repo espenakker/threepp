@@ -283,12 +283,14 @@ struct OceanUniforms {
 };
 @group(0) @binding(2) var<uniform> ocean: OceanUniforms;
 
-@group(0) @binding(3) var t_heightMap: texture_2d<f32>;
-@group(0) @binding(4) var s_heightMap: sampler;
-@group(0) @binding(5) var t_displacementMap: texture_2d<f32>;
-@group(0) @binding(6) var s_displacementMap: sampler;
-@group(0) @binding(7) var t_gradientMap: texture_2d<f32>;
-@group(0) @binding(8) var s_gradientMap: sampler;
+// Bindings assigned alphabetically by customTextures key:
+// displacementMap (3,4), gradientMap (5,6), heightMap (7,8)
+@group(0) @binding(3) var t_displacementMap: texture_2d<f32>;
+@group(0) @binding(4) var s_displacementMap: sampler;
+@group(0) @binding(5) var t_gradientMap: texture_2d<f32>;
+@group(0) @binding(6) var s_gradientMap: sampler;
+@group(0) @binding(7) var t_heightMap: texture_2d<f32>;
+@group(0) @binding(8) var s_heightMap: sampler;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,

@@ -773,10 +773,8 @@ struct DawnRenderer::Impl {
     struct { uint32_t x=0, y=0, w=0, h=0; } scissor_;
     bool scissorTest_ = false;
 
-    // Uniform buffers (per-object, written each draw call)
-    WGPUBuffer transformBuffer = nullptr;   // binding 0
-    WGPUBuffer materialBuffer = nullptr;    // binding 1
-    WGPUBuffer lightBuffer = nullptr;       // binding 2
+    // Uniform buffers
+    WGPUBuffer lightBuffer = nullptr;       // binding 2 (per-frame, shared)
 
     // Pipeline cache keyed by feature bitmask
     struct PipelineEntry {
@@ -848,8 +846,6 @@ struct DawnRenderer::Impl {
         std::vector<WGPUBindGroupLayoutEntry> bglEntries;
     };
     std::unordered_map<Material*, CustomPipelineEntry> customPipelineCache;
-    WGPUBuffer customTransformBuffer = nullptr;
-    WGPUBuffer customLightBuffer = nullptr;
 
     // Render info/statistics
     struct {
@@ -1384,8 +1380,6 @@ struct DawnRenderer::Impl {
             d.usage = WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst;
             return wgpuDeviceCreateBuffer(device, &d);
         };
-        transformBuffer = makeBuffer("transform_buf", 13, TRANSFORM_UNIFORM_SIZE);
-        materialBuffer  = makeBuffer("material_buf", 12, MATERIAL_UNIFORM_SIZE);
         lightBuffer     = makeBuffer("light_buf", 9, LIGHT_UNIFORM_SIZE);
     }
 
@@ -2195,19 +2189,9 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
 
         auto& pe = customPipelineCache[sm];
 
-        if (!customTransformBuffer) {
-            auto makeBuffer = [&](const char* name, size_t nameLen, size_t sz) {
-                WGPUBufferDescriptor d{};
-                d.label = {.data = name, .length = nameLen};
-                d.size = sz;
-                d.usage = WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst;
-                return wgpuDeviceCreateBuffer(device, &d);
-            };
-            customTransformBuffer = makeBuffer("custom_xform", 12, TRANSFORM_UNIFORM_SIZE);
-            customLightBuffer = makeBuffer("custom_light", 12, LIGHT_UNIFORM_SIZE);
-        }
-
-        // Upload transform uniforms
+        // Create per-draw transform buffer (each draw needs its own buffer because
+        // wgpuQueueWriteBuffer writes are batched before the render pass executes,
+        // so a shared buffer would only contain the last write's data).
         float transformData[TRANSFORM_UNIFORM_SIZE / sizeof(float)];
         std::memset(transformData, 0, sizeof(transformData));
         std::memcpy(transformData, mesh->matrixWorld->elements.data(), 64);
@@ -2232,11 +2216,16 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
         transformData[62] = camPos.z;
         transformData[63] = 0;
 
-        wgpuQueueWriteBuffer(queue, customTransformBuffer, 0, transformData, TRANSFORM_UNIFORM_SIZE);
+        WGPUBufferDescriptor xfBufDesc{};
+        xfBufDesc.label = {.data = "custom_xform", .length = 12};
+        xfBufDesc.size = TRANSFORM_UNIFORM_SIZE;
+        xfBufDesc.usage = WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst;
+        WGPUBuffer perDrawTransformBuf = wgpuDeviceCreateBuffer(device, &xfBufDesc);
+        wgpuQueueWriteBuffer(queue, perDrawTransformBuf, 0, transformData, TRANSFORM_UNIFORM_SIZE);
 
         // Build bind group entries
         std::vector<WGPUBindGroupEntry> entries;
-        { WGPUBindGroupEntry e{}; e.binding = 0; e.buffer = customTransformBuffer; e.offset = 0; e.size = TRANSFORM_UNIFORM_SIZE; entries.push_back(e); }
+        { WGPUBindGroupEntry e{}; e.binding = 0; e.buffer = perDrawTransformBuf; e.offset = 0; e.size = TRANSFORM_UNIFORM_SIZE; entries.push_back(e); }
         { WGPUBindGroupEntry e{}; e.binding = 1; e.buffer = lightBuffer; e.offset = 0; e.size = LIGHT_UNIFORM_SIZE; entries.push_back(e); }
 
         // Custom uniforms at binding 2
@@ -2314,6 +2303,7 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
         }
 
         wgpuBindGroupRelease(bg);
+        wgpuBufferRelease(perDrawTransformBuf);
         if (customUniformBuf) wgpuBufferRelease(customUniformBuf);
     }
 
@@ -2398,6 +2388,14 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
         // Geometry comes from the render item (set during collection)
         // For sprites without geometry, skip for now
         if (!geometry) return;
+
+        // ShaderMaterial: use the custom rendering path with user-provided WGSL shaders
+        if (auto* sm = dynamic_cast<ShaderMaterial*>(rawMat)) {
+            if (auto* mesh = object->as<Mesh>()) {
+                renderCustomShaderObject(pass, mesh, sm, projectionMatrix, viewMatrix, camera);
+                return;
+            }
+        }
 
         // Determine features and extract material parameters
         uint64_t features = FEAT_NONE;
@@ -2619,7 +2617,15 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
         transformData[62] = camPos.z;
         transformData[63] = 0;
 
-        wgpuQueueWriteBuffer(queue, transformBuffer, 0, transformData, TRANSFORM_UNIFORM_SIZE);
+        // Create per-draw uniform buffers (wgpuQueueWriteBuffer writes are batched
+        // before the render pass executes, so a shared buffer across draws would only
+        // contain the last write's data).
+        WGPUBufferDescriptor xfDesc{};
+        xfDesc.label = {.data = "xform_buf", .length = 9};
+        xfDesc.size = TRANSFORM_UNIFORM_SIZE;
+        xfDesc.usage = WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst;
+        WGPUBuffer perDrawTransform = wgpuDeviceCreateBuffer(device, &xfDesc);
+        wgpuQueueWriteBuffer(queue, perDrawTransform, 0, transformData, TRANSFORM_UNIFORM_SIZE);
 
         // Upload material uniforms (now includes fog and tone mapping data)
         float matData[MATERIAL_UNIFORM_SIZE / sizeof(float)];
@@ -2645,15 +2651,21 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
             matData[30] = cp.normal.z;
             matData[31] = cp.constant;
         }
-        wgpuQueueWriteBuffer(queue, materialBuffer, 0, matData, MATERIAL_UNIFORM_SIZE);
+
+        WGPUBufferDescriptor matDesc{};
+        matDesc.label = {.data = "mat_buf", .length = 7};
+        matDesc.size = MATERIAL_UNIFORM_SIZE;
+        matDesc.usage = WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst;
+        WGPUBuffer perDrawMaterial = wgpuDeviceCreateBuffer(device, &matDesc);
+        wgpuQueueWriteBuffer(queue, perDrawMaterial, 0, matData, MATERIAL_UNIFORM_SIZE);
 
         // Build bind group dynamically
         bool lit = features & (FEAT_LIGHTING | FEAT_SPECULAR | FEAT_PBR);
         bool tex = features & FEAT_TEXTURE;
 
         std::vector<WGPUBindGroupEntry> entries;
-        { WGPUBindGroupEntry e{}; e.binding = 0; e.buffer = transformBuffer; e.offset = 0; e.size = TRANSFORM_UNIFORM_SIZE; entries.push_back(e); }
-        { WGPUBindGroupEntry e{}; e.binding = 1; e.buffer = materialBuffer; e.offset = 0; e.size = MATERIAL_UNIFORM_SIZE; entries.push_back(e); }
+        { WGPUBindGroupEntry e{}; e.binding = 0; e.buffer = perDrawTransform; e.offset = 0; e.size = TRANSFORM_UNIFORM_SIZE; entries.push_back(e); }
+        { WGPUBindGroupEntry e{}; e.binding = 1; e.buffer = perDrawMaterial; e.offset = 0; e.size = MATERIAL_UNIFORM_SIZE; entries.push_back(e); }
 
         if (lit) {
             WGPUBindGroupEntry e{}; e.binding = 2; e.buffer = lightBuffer; e.offset = 0; e.size = LIGHT_UNIFORM_SIZE; entries.push_back(e);
@@ -2948,6 +2960,8 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
         }
 
         wgpuBindGroupRelease(bg);
+        wgpuBufferRelease(perDrawTransform);
+        wgpuBufferRelease(perDrawMaterial);
         if (instanceBuffer) {
             wgpuBufferRelease(instanceBuffer);
         }
@@ -2995,13 +3009,9 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
             if (pe.shader) wgpuShaderModuleRelease(pe.shader);
         }
         customPipelineCache.clear();
-        if (customTransformBuffer) { wgpuBufferRelease(customTransformBuffer); customTransformBuffer = nullptr; }
-        if (customLightBuffer) { wgpuBufferRelease(customLightBuffer); customLightBuffer = nullptr; }
 
         disposeShadowMap();
 
-        if (transformBuffer) wgpuBufferRelease(transformBuffer);
-        if (materialBuffer) wgpuBufferRelease(materialBuffer);
         if (lightBuffer) wgpuBufferRelease(lightBuffer);
         if (queue) wgpuQueueRelease(queue);
         if (device) wgpuDeviceRelease(device);
