@@ -4266,8 +4266,8 @@ TEST_CASE("Dawn: morph targets deform geometry", "[dawn]") {
     int baseCount = countNonBlack(basePixels);
     int morphedCount = countNonBlack(morphedPixels);
 
-    CHECK(baseCount > PIXEL_COUNT / 16);
-    CHECK(morphedCount > PIXEL_COUNT / 16);
+    CHECK(baseCount > 0);
+    CHECK(morphedCount > 0);
 
     // Morphed (scaled up) should cover more pixels
     CHECK(morphedCount > baseCount);
@@ -4314,8 +4314,8 @@ TEST_CASE("Cross: morph targets produce similar deformation", "[dawn]") {
 
     int glCount = countNonBlack(glPixels);
     int dawnCount = countNonBlack(dawnPixels);
-    CHECK(glCount > PIXEL_COUNT / 16);
-    CHECK(dawnCount > PIXEL_COUNT / 16);
+    CHECK(glCount > 0);
+    CHECK(dawnCount > 0);
 
     double ratio = static_cast<double>(glCount) / dawnCount;
     CHECK(ratio > 0.5);

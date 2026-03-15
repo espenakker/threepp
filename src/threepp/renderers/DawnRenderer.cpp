@@ -122,6 +122,8 @@ namespace {
     constexpr uint32_t FEAT_FOG_LINEAR  = 1 << 13;
     constexpr uint32_t FEAT_FOG_EXP2    = 1 << 14;
     constexpr uint32_t FEAT_INSTANCE_COLOR = 1 << 15;
+    constexpr uint32_t FEAT_DISPLACEMENT_MAP = 1 << 16;
+    constexpr uint32_t FEAT_MORPH_TARGETS    = 1 << 17;
 
     // Tone mapping mode encoded in bits 15-16
     constexpr uint32_t TONEMAP_SHIFT    = 15;
@@ -267,6 +269,10 @@ struct MaterialUniforms {
             s << "@group(0) @binding(26) var t_gradientMap: texture_2d<f32>;\n";
             s << "@group(0) @binding(27) var s_gradientMap: sampler;\n";
         }
+        if (features & FEAT_DISPLACEMENT_MAP) {
+            s << "@group(0) @binding(30) var t_displacementMap: texture_2d<f32>;\n";
+            s << "@group(0) @binding(31) var s_displacementMap: sampler;\n";
+        }
 
         if (features & FEAT_INSTANCED) {
             s << "struct InstanceData {\n";
@@ -276,6 +282,18 @@ struct MaterialUniforms {
             }
             s << "};\n";
             s << "@group(0) @binding(28) var<storage, read> instances: array<InstanceData>;\n";
+        }
+
+        if (features & FEAT_MORPH_TARGETS) {
+            // Storage buffer: [numTargets, influence0, influence1, ..., pad..., morphPositions...]
+            // morphPositions: for each target, vertexCount vec3s stored as vec4s
+            s << "struct MorphData {\n";
+            s << "    numTargets: u32,\n";
+            s << "    _pad0: u32, _pad1: u32, _pad2: u32,\n";
+            s << "    influences: array<vec4<f32>, 2>,\n"; // up to 8 influences (2 vec4s)
+            s << "    positions: array<vec4<f32>>,\n";     // packed morph positions
+            s << "};\n";
+            s << "@group(0) @binding(29) var<storage, read> morph: MorphData;\n";
         }
 
         if (features & FEAT_SHADOW) {
@@ -316,22 +334,49 @@ struct ShadowUniforms {
         }
         s << "};\n";
 
+        // Build vertex function signature with optional builtins
         s << "\n@vertex\n";
-        if (features & FEAT_INSTANCED) {
-            s << "fn vs_main(in: VertexInput, @builtin(instance_index) iid: u32) -> VertexOutput {\n";
-        } else {
-            s << "fn vs_main(in: VertexInput) -> VertexOutput {\n";
+        {
+            bool needInstanceIdx = features & FEAT_INSTANCED;
+            bool needVertexIdx = features & FEAT_MORPH_TARGETS;
+            s << "fn vs_main(in: VertexInput";
+            if (needInstanceIdx) s << ", @builtin(instance_index) iid: u32";
+            if (needVertexIdx) s << ", @builtin(vertex_index) vid: u32";
+            s << ") -> VertexOutput {\n";
         }
         s << "    var out: VertexOutput;\n";
+
+        // Morph target blending: blend base position with morph targets
+        if (features & FEAT_MORPH_TARGETS) {
+            s << "    var morphedPos = in.position;\n";
+            s << "    let numT = morph.numTargets;\n";
+            s << "    for (var t = 0u; t < numT; t++) {\n";
+            s << "        let inf = morph.influences[t / 4u][t % 4u];\n";
+            s << "        if (inf > 0.0) {\n";
+            s << "            let mp = morph.positions[t * " << "arrayLength(&morph.positions) / max(numT, 1u)" << " + vid];\n";
+            s << "            morphedPos = morphedPos + (mp.xyz - in.position) * inf;\n";
+            s << "        }\n";
+            s << "    }\n";
+        }
+
+        // Optionally displace position along normal before transform
+        if (features & FEAT_DISPLACEMENT_MAP) {
+            std::string posVar = (features & FEAT_MORPH_TARGETS) ? "morphedPos" : "in.position";
+            s << "    let dispAmount = textureSampleLevel(t_displacementMap, s_displacementMap, in.uv, 0.0).r;\n";
+            s << "    let displacedPos = " << posVar << " + in.normal * dispAmount * material.roughnessMetalnessOpacity.w;\n";
+        }
+        // Determine which position variable to use
+        std::string posExpr = "in.position";
+        if (features & FEAT_MORPH_TARGETS) posExpr = "morphedPos";
+        if (features & FEAT_DISPLACEMENT_MAP) posExpr = "displacedPos";
+
         if (features & FEAT_INSTANCED) {
-            // Apply instance matrix before model matrix
             s << "    let instanceModel = transform.model * instances[iid].model;\n";
-            s << "    let worldPos4 = instanceModel * vec4<f32>(in.position, 1.0);\n";
-            // Compute normal matrix from instance model
+            s << "    let worldPos4 = instanceModel * vec4<f32>(" << posExpr << ", 1.0);\n";
             s << "    let im3 = mat3x3<f32>(instanceModel[0].xyz, instanceModel[1].xyz, instanceModel[2].xyz);\n";
             s << "    out.worldNormal = normalize(im3 * in.normal);\n";
         } else {
-            s << "    let worldPos4 = transform.model * vec4<f32>(in.position, 1.0);\n";
+            s << "    let worldPos4 = transform.model * vec4<f32>(" << posExpr << ", 1.0);\n";
             s << "    let nm = mat3x3<f32>(transform.normalCol0.xyz, transform.normalCol1.xyz, transform.normalCol2.xyz);\n";
             s << "    out.worldNormal = normalize(nm * in.normal);\n";
         }
@@ -983,9 +1028,10 @@ struct DawnRenderer::Impl {
           e.buffer.minBindingSize = TRANSFORM_UNIFORM_SIZE;
           bglEntries.push_back(e); }
 
-        // Binding 1: material uniforms
+        // Binding 1: material uniforms (vertex stage needed for displacement map)
         { WGPUBindGroupLayoutEntry e{}; e.binding = 1;
-          e.visibility = WGPUShaderStage_Fragment;
+          e.visibility = WGPUShaderStage_Fragment |
+                         ((features & FEAT_DISPLACEMENT_MAP) ? WGPUShaderStage_Vertex : 0);
           e.buffer.type = WGPUBufferBindingType_Uniform;
           e.buffer.minBindingSize = MATERIAL_UNIFORM_SIZE;
           bglEntries.push_back(e); }
@@ -1072,6 +1118,26 @@ struct DawnRenderer::Impl {
             e.visibility = WGPUShaderStage_Vertex;
             e.buffer.type = WGPUBufferBindingType_ReadOnlyStorage;
             bglEntries.push_back(e);
+        }
+
+        if (features & FEAT_MORPH_TARGETS) {
+            WGPUBindGroupLayoutEntry e{};
+            e.binding = 29;
+            e.visibility = WGPUShaderStage_Vertex;
+            e.buffer.type = WGPUBufferBindingType_ReadOnlyStorage;
+            bglEntries.push_back(e);
+        }
+
+        if (features & FEAT_DISPLACEMENT_MAP) {
+            { WGPUBindGroupLayoutEntry e{}; e.binding = 30;
+              e.visibility = WGPUShaderStage_Vertex;
+              e.texture.sampleType = WGPUTextureSampleType_Float;
+              e.texture.viewDimension = WGPUTextureViewDimension_2D;
+              bglEntries.push_back(e); }
+            { WGPUBindGroupLayoutEntry e{}; e.binding = 31;
+              e.visibility = WGPUShaderStage_Vertex;
+              e.sampler.type = WGPUSamplerBindingType_Filtering;
+              bglEntries.push_back(e); }
         }
 
         WGPUBindGroupLayoutDescriptor bglDesc{};
@@ -1958,6 +2024,8 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
         Texture* lightMap = nullptr;
         Texture* bumpMap = nullptr;
         Texture* gradientMap = nullptr;
+        Texture* displacementMap = nullptr;
+        float displacementScale = 1.0f;
         Vector2 normalScale(1, 1);
         float aoMapIntensity = 1.0f;
         float bumpScale = 1.0f;
@@ -1979,6 +2047,7 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
             if (m->alphaMap) { alphaMap = m->alphaMap.get(); features |= FEAT_ALPHA_MAP; }
             if (m->lightMap) { lightMap = m->lightMap.get(); features |= FEAT_LIGHT_MAP; }
             if (m->bumpMap) { bumpMap = m->bumpMap.get(); bumpScale = m->bumpScale; features |= FEAT_BUMP_MAP; }
+            if (m->displacementMap) { displacementMap = m->displacementMap.get(); displacementScale = m->displacementScale; features |= FEAT_DISPLACEMENT_MAP; }
         } else if (auto m = dynamic_cast<MeshPhongMaterial*>(rawMat)) {
             features |= FEAT_LIGHTING | FEAT_SPECULAR;
             diffuse = m->color; specularColor = m->specular; shininess = m->shininess;
@@ -2072,6 +2141,15 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
             }
         }
 
+        // Morph targets
+        auto* morphMat = dynamic_cast<MaterialWithMorphTargets*>(rawMat);
+        if (morphMat && morphMat->morphTargets && geometry->getMorphAttributes().count("position") > 0) {
+            auto mesh = object->as<Mesh>();
+            if (mesh && !mesh->morphTargetInfluences().empty()) {
+                features |= FEAT_MORPH_TARGETS;
+            }
+        }
+
         // Shadow (mesh objects only)
         if (isMesh && shadowState.active && object->receiveShadow) {
             features |= FEAT_SHADOW;
@@ -2122,7 +2200,7 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
         std::memset(matData, 0, sizeof(matData));
         matData[0] = diffuse.r; matData[1] = diffuse.g; matData[2] = diffuse.b; matData[3] = 1.0f;
         matData[4] = specularColor.r; matData[5] = specularColor.g; matData[6] = specularColor.b; matData[7] = shininess;
-        matData[8] = roughness; matData[9] = metalness; matData[10] = opacity; matData[11] = 0;
+        matData[8] = roughness; matData[9] = metalness; matData[10] = opacity; matData[11] = displacementScale;
         matData[12] = emissive.r; matData[13] = emissive.g; matData[14] = emissive.b; matData[15] = 0;
         matData[16] = aoMapIntensity;  // flags.x: aoMapIntensity
         matData[17] = bumpScale;       // flags.y: bumpScale
@@ -2195,6 +2273,7 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
         if (features & FEAT_LIGHT_MAP)     addTexEntries(22, 23, lightMap);
         if (features & FEAT_BUMP_MAP)      addTexEntries(24, 25, bumpMap);
         if (features & FEAT_GRADIENT_MAP)  addTexEntries(26, 27, gradientMap);
+        if (features & FEAT_DISPLACEMENT_MAP) addTexEntries(30, 31, displacementMap);
 
         // Instance data buffer
         WGPUBuffer instanceBuffer = nullptr;
@@ -2232,6 +2311,64 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
             WGPUBindGroupEntry e{};
             e.binding = 28;
             e.buffer = instanceBuffer;
+            e.offset = 0;
+            e.size = bufSize;
+            entries.push_back(e);
+        }
+
+        // Morph target data buffer
+        WGPUBuffer morphBuffer = nullptr;
+        if (features & FEAT_MORPH_TARGETS) {
+            auto mesh = object->as<Mesh>();
+            auto& morphAttrs = geometry->getMorphAttributes().at("position");
+            uint32_t numTargets = static_cast<uint32_t>(morphAttrs.size());
+            uint32_t vertexCount = static_cast<uint32_t>(geometry->getAttribute<float>("position")->count());
+            auto& influences = mesh->morphTargetInfluences();
+
+            // Layout: header (4 u32 = numTargets + 3 padding) +
+            //         influences (2 vec4 = 8 floats) +
+            //         positions (numTargets * vertexCount vec4s)
+            size_t headerSize = 4;  // 4 u32s = 1 vec4
+            size_t influenceSize = 8; // 2 vec4s = 8 floats
+            size_t posSize = numTargets * vertexCount * 4; // vec4 per vertex per target
+            size_t totalFloats = headerSize + influenceSize + posSize;
+            std::vector<float> morphData(totalFloats, 0.0f);
+
+            auto* u32Data = reinterpret_cast<uint32_t*>(morphData.data());
+            u32Data[0] = numTargets;
+
+            // Pack influences
+            for (uint32_t t = 0; t < numTargets && t < 8; t++) {
+                if (t < influences.size()) {
+                    morphData[headerSize + t] = influences[t];
+                }
+            }
+
+            // Pack morph target positions as vec4s
+            size_t posOffset = headerSize + influenceSize;
+            for (uint32_t t = 0; t < numTargets; t++) {
+                auto* attr = dynamic_cast<TypedBufferAttribute<float>*>(morphAttrs[t].get());
+                if (!attr) continue;
+                for (uint32_t v = 0; v < vertexCount; v++) {
+                    size_t idx = posOffset + (t * vertexCount + v) * 4;
+                    morphData[idx + 0] = attr->getX(v);
+                    morphData[idx + 1] = attr->getY(v);
+                    morphData[idx + 2] = attr->getZ(v);
+                    morphData[idx + 3] = 0.0f;
+                }
+            }
+
+            size_t bufSize = totalFloats * sizeof(float);
+            WGPUBufferDescriptor bd{};
+            bd.label = {.data = "morph_data", .length = 10};
+            bd.size = bufSize;
+            bd.usage = WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst;
+            morphBuffer = wgpuDeviceCreateBuffer(device, &bd);
+            wgpuQueueWriteBuffer(queue, morphBuffer, 0, morphData.data(), bufSize);
+
+            WGPUBindGroupEntry e{};
+            e.binding = 29;
+            e.buffer = morphBuffer;
             e.offset = 0;
             e.size = bufSize;
             entries.push_back(e);
@@ -2319,6 +2456,9 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
         wgpuBindGroupRelease(bg);
         if (instanceBuffer) {
             wgpuBufferRelease(instanceBuffer);
+        }
+        if (morphBuffer) {
+            wgpuBufferRelease(morphBuffer);
         }
     }
 
