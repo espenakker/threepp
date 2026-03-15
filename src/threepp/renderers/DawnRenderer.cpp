@@ -15,6 +15,7 @@
 #include "threepp/materials/MeshLambertMaterial.hpp"
 #include "threepp/materials/MeshPhongMaterial.hpp"
 #include "threepp/materials/MeshStandardMaterial.hpp"
+#include "threepp/materials/MeshToonMaterial.hpp"
 #include "threepp/materials/LineBasicMaterial.hpp"
 #include "threepp/materials/PointsMaterial.hpp"
 #include "threepp/materials/SpriteMaterial.hpp"
@@ -120,6 +121,7 @@ namespace {
     constexpr uint32_t FEAT_SHADOW      = 1 << 12;
     constexpr uint32_t FEAT_FOG_LINEAR  = 1 << 13;
     constexpr uint32_t FEAT_FOG_EXP2    = 1 << 14;
+    constexpr uint32_t FEAT_INSTANCE_COLOR = 1 << 15;
 
     // Tone mapping mode encoded in bits 15-16
     constexpr uint32_t TONEMAP_SHIFT    = 15;
@@ -154,6 +156,7 @@ namespace {
     constexpr uint32_t FEAT_LIGHT_MAP    = 1 << 28;
     constexpr uint32_t FEAT_SRGB_OUTPUT  = 1 << 29;
     constexpr uint32_t FEAT_BUMP_MAP     = 1u << 30;
+    constexpr uint32_t FEAT_GRADIENT_MAP = 1u << 31;
 
     constexpr uint32_t SHADOW_MAP_SIZE = 1024;
     constexpr size_t SHADOW_UNIFORM_SIZE = 80; // lightVP(64) + bias(4) + normalBias(4) + padding(8)
@@ -197,7 +200,7 @@ struct MaterialUniforms {
     flags: vec4<f32>,
     fogColor: vec4<f32>,
     fogParams: vec4<f32>,
-    _pad: vec4<f32>,
+    clipPlane: vec4<f32>,
 };
 @group(0) @binding(1) var<uniform> material: MaterialUniforms;
 )";
@@ -260,6 +263,20 @@ struct MaterialUniforms {
             s << "@group(0) @binding(24) var t_bumpMap: texture_2d<f32>;\n";
             s << "@group(0) @binding(25) var s_bumpMap: sampler;\n";
         }
+        if (features & FEAT_GRADIENT_MAP) {
+            s << "@group(0) @binding(26) var t_gradientMap: texture_2d<f32>;\n";
+            s << "@group(0) @binding(27) var s_gradientMap: sampler;\n";
+        }
+
+        if (features & FEAT_INSTANCED) {
+            s << "struct InstanceData {\n";
+            s << "    model: mat4x4<f32>,\n";
+            if (features & FEAT_INSTANCE_COLOR) {
+                s << "    color: vec4<f32>,\n";
+            }
+            s << "};\n";
+            s << "@group(0) @binding(28) var<storage, read> instances: array<InstanceData>;\n";
+        }
 
         if (features & FEAT_SHADOW) {
             s << R"(
@@ -294,24 +311,42 @@ struct ShadowUniforms {
         if (features & FEAT_VERTEX_COLORS) {
             s << "    @location(4) vertexColor: vec3<f32>,\n";
         }
+        if (features & FEAT_INSTANCE_COLOR) {
+            s << "    @location(5) instanceColor: vec3<f32>,\n";
+        }
         s << "};\n";
 
-        s << R"(
-@vertex
-fn vs_main(in: VertexInput) -> VertexOutput {
-    var out: VertexOutput;
-    let worldPos4 = transform.model * vec4<f32>(in.position, 1.0);
-    out.worldPos = worldPos4.xyz;
-    let nm = mat3x3<f32>(transform.normalCol0.xyz, transform.normalCol1.xyz, transform.normalCol2.xyz);
-    out.worldNormal = normalize(nm * in.normal);
-    out.uv = in.uv;
-    out.clipPos = transform.proj * transform.view * worldPos4;)";
+        s << "\n@vertex\n";
+        if (features & FEAT_INSTANCED) {
+            s << "fn vs_main(in: VertexInput, @builtin(instance_index) iid: u32) -> VertexOutput {\n";
+        } else {
+            s << "fn vs_main(in: VertexInput) -> VertexOutput {\n";
+        }
+        s << "    var out: VertexOutput;\n";
+        if (features & FEAT_INSTANCED) {
+            // Apply instance matrix before model matrix
+            s << "    let instanceModel = transform.model * instances[iid].model;\n";
+            s << "    let worldPos4 = instanceModel * vec4<f32>(in.position, 1.0);\n";
+            // Compute normal matrix from instance model
+            s << "    let im3 = mat3x3<f32>(instanceModel[0].xyz, instanceModel[1].xyz, instanceModel[2].xyz);\n";
+            s << "    out.worldNormal = normalize(im3 * in.normal);\n";
+        } else {
+            s << "    let worldPos4 = transform.model * vec4<f32>(in.position, 1.0);\n";
+            s << "    let nm = mat3x3<f32>(transform.normalCol0.xyz, transform.normalCol1.xyz, transform.normalCol2.xyz);\n";
+            s << "    out.worldNormal = normalize(nm * in.normal);\n";
+        }
+        s << "    out.worldPos = worldPos4.xyz;\n";
+        s << "    out.uv = in.uv;\n";
+        s << "    out.clipPos = transform.proj * transform.view * worldPos4;\n";
 
         if (features & FEAT_SHADOW) {
             s << "\n    out.lightSpacePos = shadow.lightVP * worldPos4;\n";
         }
         if (features & FEAT_VERTEX_COLORS) {
             s << "\n    out.vertexColor = in.color;\n";
+        }
+        if (features & FEAT_INSTANCE_COLOR) {
+            s << "    out.instanceColor = instances[iid].color.rgb;\n";
         }
 
         s << R"(
@@ -320,6 +355,13 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    // Clipping plane test (active when clipPlane normal is non-zero)
+    let cpn = material.clipPlane.xyz;
+    if (dot(cpn, cpn) > 0.0) {
+        if (dot(in.worldPos, cpn) + material.clipPlane.w < 0.0) {
+            discard;
+        }
+    }
     var baseColor = material.diffuse.rgb;
     var opacity = material.roughnessMetalnessOpacity.z;
     var roughness = material.roughnessMetalnessOpacity.x;
@@ -327,6 +369,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 )";
         if (features & FEAT_VERTEX_COLORS) {
             s << "    baseColor = baseColor * in.vertexColor;\n";
+        }
+        if (features & FEAT_INSTANCE_COLOR) {
+            s << "    baseColor = baseColor * in.instanceColor;\n";
         }
 
         if (features & FEAT_TEXTURE) {
@@ -389,8 +434,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     var diffuseLight = lights.ambient;
     var specularLight = vec3<f32>(0.0, 0.0, 0.0);
     for (var i = 0u; i < lights.numDir; i++) {
-        let L = normalize(-lights.directional[i].direction);
-        let NdotL = max(dot(N, L), 0.0);
+        let L = normalize(lights.directional[i].direction);
+        var NdotL = max(dot(N, L), 0.0);
+)";
+            if (features & FEAT_GRADIENT_MAP) {
+                s << "        NdotL = textureSample(t_gradientMap, s_gradientMap, vec2<f32>(NdotL, 0.5)).r;\n";
+            }
+            s << R"(
         diffuseLight += lights.directional[i].color * NdotL;
 )";
             if (features & FEAT_SPECULAR) {
@@ -415,14 +465,17 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     for (var i = 0u; i < lights.numPoint; i++) {
         let lv = lights.point[i].position - in.worldPos;
         let d = length(lv); let L = normalize(lv);
-        let NdotL = max(dot(N, L), 0.0);
+        var NdotL = max(dot(N, L), 0.0);
         var att = 1.0;
         if (lights.point[i].distance > 0.0) {
             let r2 = clamp(1.0 - pow(d / lights.point[i].distance, 4.0), 0.0, 1.0);
             att = r2 * r2 / (d * d + 0.0001);
         }
-        diffuseLight += lights.point[i].color * NdotL * att;
 )";
+            if (features & FEAT_GRADIENT_MAP) {
+                s << "        NdotL = textureSample(t_gradientMap, s_gradientMap, vec2<f32>(NdotL, 0.5)).r;\n";
+            }
+            s << "        diffuseLight += lights.point[i].color * NdotL * att;\n";
             if (features & FEAT_SPECULAR) {
                 s << "        { let H = normalize(L + V); let s = pow(max(dot(N, H), 0.0), material.specularAndShininess.w);\n";
                 s << "          specularLight += lights.point[i].color * material.specularAndShininess.rgb * s * att; }\n";
@@ -443,7 +496,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     for (var i = 0u; i < lights.numSpot; i++) {
         let lv = lights.spot[i].position - in.worldPos;
         let d = length(lv); let L = normalize(lv);
-        let NdotL = max(dot(N, L), 0.0);
+        var NdotL = max(dot(N, L), 0.0);
         let ac = dot(L, normalize(lights.spot[i].direction));
         let se = smoothstep(lights.spot[i].coneCos, lights.spot[i].penumbraCos, ac);
         var att = se;
@@ -451,8 +504,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             let r2 = clamp(1.0 - pow(d / lights.spot[i].distance, 4.0), 0.0, 1.0);
             att = att * r2 * r2 / (d * d + 0.0001);
         }
-        diffuseLight += lights.spot[i].color * NdotL * att;
 )";
+            if (features & FEAT_GRADIENT_MAP) {
+                s << "        NdotL = textureSample(t_gradientMap, s_gradientMap, vec2<f32>(NdotL, 0.5)).r;\n";
+            }
+            s << "        diffuseLight += lights.spot[i].color * NdotL * att;\n";
             if (features & FEAT_SPECULAR) {
                 s << "        { let H = normalize(L + V); let s = pow(max(dot(N, H), 0.0), material.specularAndShininess.w);\n";
                 s << "          specularLight += lights.spot[i].color * material.specularAndShininess.rgb * s * att; }\n";
@@ -1008,6 +1064,15 @@ struct DawnRenderer::Impl {
         if (features & FEAT_SPECULAR_MAP)  addTexSamplerBindings(20, 21);
         if (features & FEAT_LIGHT_MAP)     addTexSamplerBindings(22, 23);
         if (features & FEAT_BUMP_MAP)      addTexSamplerBindings(24, 25);
+        if (features & FEAT_GRADIENT_MAP)  addTexSamplerBindings(26, 27);
+
+        if (features & FEAT_INSTANCED) {
+            WGPUBindGroupLayoutEntry e{};
+            e.binding = 28;
+            e.visibility = WGPUShaderStage_Vertex;
+            e.buffer.type = WGPUBufferBindingType_ReadOnlyStorage;
+            bglEntries.push_back(e);
+        }
 
         WGPUBindGroupLayoutDescriptor bglDesc{};
         WGPUStringView bglLabel = {.data = "bind_group_layout", .length = 17};
@@ -1892,6 +1957,7 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
         Texture* specularMap = nullptr;
         Texture* lightMap = nullptr;
         Texture* bumpMap = nullptr;
+        Texture* gradientMap = nullptr;
         Vector2 normalScale(1, 1);
         float aoMapIntensity = 1.0f;
         float bumpScale = 1.0f;
@@ -1925,6 +1991,15 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
             if (m->specularMap) { specularMap = m->specularMap.get(); features |= FEAT_SPECULAR_MAP; }
             if (m->lightMap) { lightMap = m->lightMap.get(); features |= FEAT_LIGHT_MAP; }
             if (m->bumpMap) { bumpMap = m->bumpMap.get(); bumpScale = m->bumpScale; features |= FEAT_BUMP_MAP; }
+        } else if (auto m = dynamic_cast<MeshToonMaterial*>(rawMat)) {
+            features |= FEAT_LIGHTING;
+            diffuse = m->color;
+            emissive = m->emissive;
+            if (m->map) { diffuseMap = m->map.get(); features |= FEAT_TEXTURE; }
+            if (m->emissiveMap) { emissiveMap = m->emissiveMap.get(); features |= FEAT_EMISSIVE_MAP; }
+            if (m->normalMap) { normalMap = m->normalMap.get(); normalScale = m->normalScale; features |= FEAT_NORMAL_MAP; }
+            if (m->bumpMap) { bumpMap = m->bumpMap.get(); bumpScale = m->bumpScale; features |= FEAT_BUMP_MAP; }
+            if (m->gradientMap) { gradientMap = m->gradientMap.get(); features |= FEAT_GRADIENT_MAP; }
         } else if (auto m = dynamic_cast<MeshLambertMaterial*>(rawMat)) {
             features |= FEAT_LIGHTING;
             diffuse = m->color;
@@ -1989,6 +2064,14 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
             features |= FEAT_VERTEX_COLORS;
         }
 
+        // Instancing
+        if (instancedMesh) {
+            features |= FEAT_INSTANCED;
+            if (instancedMesh->instanceColor()) {
+                features |= FEAT_INSTANCE_COLOR;
+            }
+        }
+
         // Shadow (mesh objects only)
         if (isMesh && shadowState.active && object->receiveShadow) {
             features |= FEAT_SHADOW;
@@ -2050,6 +2133,14 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
         // fogParams: x=near, y=far, z=density, w=toneMappingExposure (vec4, offset 24)
         matData[24] = fogNear; matData[25] = fogFar; matData[26] = fogDensity;
         matData[27] = scope.toneMappingExposure;
+        // clipPlane (vec4, offset 28): normal(xyz) + constant(w)
+        if (scope.localClippingEnabled && !rawMat->clippingPlanes.empty()) {
+            auto& cp = rawMat->clippingPlanes[0];
+            matData[28] = cp.normal.x;
+            matData[29] = cp.normal.y;
+            matData[30] = cp.normal.z;
+            matData[31] = cp.constant;
+        }
         wgpuQueueWriteBuffer(queue, materialBuffer, 0, matData, MATERIAL_UNIFORM_SIZE);
 
         // Build bind group dynamically
@@ -2103,6 +2194,48 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
         if (features & FEAT_SPECULAR_MAP)  addTexEntries(20, 21, specularMap);
         if (features & FEAT_LIGHT_MAP)     addTexEntries(22, 23, lightMap);
         if (features & FEAT_BUMP_MAP)      addTexEntries(24, 25, bumpMap);
+        if (features & FEAT_GRADIENT_MAP)  addTexEntries(26, 27, gradientMap);
+
+        // Instance data buffer
+        WGPUBuffer instanceBuffer = nullptr;
+        if ((features & FEAT_INSTANCED) && instancedMesh) {
+            bool hasColor = features & FEAT_INSTANCE_COLOR;
+            size_t instanceCount = instancedMesh->count();
+            // Each instance: mat4x4 (16 floats) + optional vec4 color (4 floats)
+            size_t floatsPerInstance = hasColor ? 20 : 16;
+            size_t bufSize = instanceCount * floatsPerInstance * sizeof(float);
+            std::vector<float> instanceData(instanceCount * floatsPerInstance, 0.0f);
+
+            auto* matAttr = instancedMesh->instanceMatrix();
+            auto* colAttr = instancedMesh->instanceColor();
+            for (size_t i = 0; i < instanceCount; i++) {
+                // Copy 4x4 matrix (already column-major, matching WGSL mat4x4)
+                const float* src = &matAttr->array()[i * 16];
+                float* dst = &instanceData[i * floatsPerInstance];
+                std::memcpy(dst, src, 16 * sizeof(float));
+                if (hasColor && colAttr) {
+                    const float* csrc = &colAttr->array()[i * 3];
+                    dst[16] = csrc[0];
+                    dst[17] = csrc[1];
+                    dst[18] = csrc[2];
+                    dst[19] = 1.0f;
+                }
+            }
+
+            WGPUBufferDescriptor bd{};
+            bd.label = {.data = "instance_data", .length = 13};
+            bd.size = bufSize;
+            bd.usage = WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst;
+            instanceBuffer = wgpuDeviceCreateBuffer(device, &bd);
+            wgpuQueueWriteBuffer(queue, instanceBuffer, 0, instanceData.data(), bufSize);
+
+            WGPUBindGroupEntry e{};
+            e.binding = 28;
+            e.buffer = instanceBuffer;
+            e.offset = 0;
+            e.size = bufSize;
+            entries.push_back(e);
+        }
 
         WGPUBindGroupDescriptor bgDesc{};
         bgDesc.label = {.data = "obj_bg", .length = 6};
@@ -2119,10 +2252,7 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
             wgpuRenderPassEncoderSetVertexBuffer(pass, 0, gb.vertexBuffer, 0,
                                                      gb.vertexCount * dawn::VERTEX_STRIDE);
 
-            uint32_t instanceCount = 1;
-            // InstancedMesh: per-instance transform buffers not yet implemented,
-            // render single instance to avoid stacked duplicates at same position
-            (void)instancedMesh;
+            uint32_t instanceCount = instancedMesh ? static_cast<uint32_t>(instancedMesh->count()) : 1;
 
             if (useWireframe) {
                 auto& wb = geometries->getOrCreateWireframeBuffers(geometry);
@@ -2187,6 +2317,9 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
         }
 
         wgpuBindGroupRelease(bg);
+        if (instanceBuffer) {
+            wgpuBufferRelease(instanceBuffer);
+        }
     }
 
     void dispose() {
