@@ -3494,17 +3494,30 @@ TEST_CASE("Dawn: ShaderMaterial renders with custom shaders", "[dawn]") {
     auto geometry = PlaneGeometry::create(2, 2);
     auto material = ShaderMaterial::create();
 
-    // Minimal vertex + fragment shader pair that outputs solid magenta
+    // WGSL vertex + fragment shader pair that outputs solid magenta
     material->vertexShader = R"(
-        void main() {
-            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-        }
-    )";
+struct TransformUniforms {
+    model: mat4x4<f32>, view: mat4x4<f32>, proj: mat4x4<f32>,
+    normalCol0: vec4<f32>, normalCol1: vec4<f32>, normalCol2: vec4<f32>,
+    cameraPos: vec3<f32>, _pad: f32,
+};
+@group(0) @binding(0) var<uniform> transform: TransformUniforms;
+struct LightData { data: array<vec4<f32>, 44> };
+@group(0) @binding(1) var<uniform> light: LightData;
+struct VSOut { @builtin(position) pos: vec4<f32> };
+@vertex fn vs_main(@location(0) position: vec3<f32>,
+                   @location(1) normal: vec3<f32>,
+                   @location(2) uv: vec2<f32>) -> VSOut {
+    var out: VSOut;
+    out.pos = transform.proj * transform.view * transform.model * vec4<f32>(position, 1.0);
+    return out;
+}
+)";
     material->fragmentShader = R"(
-        void main() {
-            gl_FragColor = vec4(1.0, 0.0, 1.0, 1.0);
-        }
-    )";
+@fragment fn fs_main() -> @location(0) vec4<f32> {
+    return vec4<f32>(1.0, 0.0, 1.0, 1.0);
+}
+)";
 
     auto mesh = Mesh::create(geometry, material);
     scene->add(mesh);
@@ -3522,7 +3535,6 @@ TEST_CASE("Dawn: ShaderMaterial renders with custom shaders", "[dawn]") {
     CHECK(avg.b > 20);
 }
 
-// DawnRenderer: ShaderMaterial (custom GLSL/WGSL) not yet supported
 TEST_CASE("Dawn: ShaderMaterial with uniforms", "[dawn]") {
     REQUIRE_DAWN();
 
@@ -3530,18 +3542,34 @@ TEST_CASE("Dawn: ShaderMaterial with uniforms", "[dawn]") {
     auto geometry = PlaneGeometry::create(2, 2);
     auto material = ShaderMaterial::create();
 
+    // WGSL shaders with a custom uniform buffer at binding 2
     material->vertexShader = R"(
-        void main() {
-            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-        }
-    )";
+struct TransformUniforms {
+    model: mat4x4<f32>, view: mat4x4<f32>, proj: mat4x4<f32>,
+    normalCol0: vec4<f32>, normalCol1: vec4<f32>, normalCol2: vec4<f32>,
+    cameraPos: vec3<f32>, _pad: f32,
+};
+@group(0) @binding(0) var<uniform> transform: TransformUniforms;
+struct LightData { data: array<vec4<f32>, 44> };
+@group(0) @binding(1) var<uniform> light: LightData;
+struct VSOut { @builtin(position) pos: vec4<f32> };
+@vertex fn vs_main(@location(0) position: vec3<f32>,
+                   @location(1) normal: vec3<f32>,
+                   @location(2) uv: vec2<f32>) -> VSOut {
+    var out: VSOut;
+    out.pos = transform.proj * transform.view * transform.model * vec4<f32>(position, 1.0);
+    return out;
+}
+)";
     material->fragmentShader = R"(
-        uniform vec3 uColor;
-        void main() {
-            gl_FragColor = vec4(uColor, 1.0);
-        }
-    )";
-    material->uniforms["uColor"].setValue(Color(0x00ff00));
+struct CustomUniforms { uColor: vec3<f32> };
+@group(0) @binding(2) var<uniform> custom: CustomUniforms;
+@fragment fn fs_main() -> @location(0) vec4<f32> {
+    return vec4<f32>(custom.uColor, 1.0);
+}
+)";
+    // Use Vector3 instead of Color — the custom uniform packer handles Vector3
+    material->uniforms["uColor"].setValue(Vector3(0, 1, 0));
 
     auto mesh = Mesh::create(geometry, material);
     scene->add(mesh);
@@ -3558,7 +3586,8 @@ TEST_CASE("Dawn: ShaderMaterial with uniforms", "[dawn]") {
 TEST_CASE("Cross: ShaderMaterial produces similar result", "[dawn]") {
     REQUIRE_DAWN();
 
-    auto makeScene = []() {
+    // GL scene with GLSL shaders
+    auto makeGLScene = []() {
         auto scene = Scene::create();
         auto geometry = PlaneGeometry::create(2, 2);
         auto material = ShaderMaterial::create();
@@ -3579,12 +3608,47 @@ TEST_CASE("Cross: ShaderMaterial produces similar result", "[dawn]") {
         return scene;
     };
 
+    // Dawn scene with equivalent WGSL shaders
+    auto makeDawnScene = []() {
+        auto scene = Scene::create();
+        auto geometry = PlaneGeometry::create(2, 2);
+        auto material = ShaderMaterial::create();
+
+        material->vertexShader = R"(
+struct TransformUniforms {
+    model: mat4x4<f32>, view: mat4x4<f32>, proj: mat4x4<f32>,
+    normalCol0: vec4<f32>, normalCol1: vec4<f32>, normalCol2: vec4<f32>,
+    cameraPos: vec3<f32>, _pad: f32,
+};
+@group(0) @binding(0) var<uniform> transform: TransformUniforms;
+struct LightData { data: array<vec4<f32>, 44> };
+@group(0) @binding(1) var<uniform> light: LightData;
+struct VSOut { @builtin(position) pos: vec4<f32> };
+@vertex fn vs_main(@location(0) position: vec3<f32>,
+                   @location(1) normal: vec3<f32>,
+                   @location(2) uv: vec2<f32>) -> VSOut {
+    var out: VSOut;
+    out.pos = transform.proj * transform.view * transform.model * vec4<f32>(position, 1.0);
+    return out;
+}
+)";
+        material->fragmentShader = R"(
+@fragment fn fs_main() -> @location(0) vec4<f32> {
+    return vec4<f32>(0.5, 0.3, 0.8, 1.0);
+}
+)";
+
+        auto mesh = Mesh::create(geometry, material);
+        scene->add(mesh);
+        return scene;
+    };
+
     auto camera = PerspectiveCamera::create(75, 1.0f, 0.1f, 100);
     camera->position.z = 3;
     Color clearColor(0x000000);
 
-    auto glPixels = renderWithGL(*makeScene(), *camera, clearColor);
-    auto dawnPixels = renderWithDawn(*makeScene(), *camera, clearColor);
+    auto glPixels = renderWithGL(*makeGLScene(), *camera, clearColor);
+    auto dawnPixels = renderWithDawn(*makeDawnScene(), *camera, clearColor);
 
     CHECK(countNonBlack(glPixels) > PIXEL_COUNT / 8);
     CHECK(countNonBlack(dawnPixels) > PIXEL_COUNT / 8);
