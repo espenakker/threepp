@@ -22,6 +22,7 @@
 #include "threepp/materials/ShadowMaterial.hpp"
 #include "threepp/materials/SpriteMaterial.hpp"
 #include "threepp/materials/interfaces.hpp"
+#include "threepp/renderers/dawn/GPUTexture.hpp"
 #include "threepp/math/Matrix3.hpp"
 #include "threepp/math/Matrix4.hpp"
 #include "threepp/objects/Mesh.hpp"
@@ -836,6 +837,20 @@ struct DawnRenderer::Impl {
     // Render list for opaque/transparent sorting
     RenderList renderList_;
 
+    // Custom shader pipeline cache (for ShaderMaterial)
+    struct CustomPipelineEntry {
+        WGPUShaderModule shader = nullptr;
+        WGPURenderPipeline pipeline = nullptr;
+        WGPUPipelineLayout layout = nullptr;
+        WGPUBindGroupLayout bindGroupLayout = nullptr;
+        size_t shaderHash = 0;
+        // Track the bind group layout structure
+        std::vector<WGPUBindGroupLayoutEntry> bglEntries;
+    };
+    std::unordered_map<Material*, CustomPipelineEntry> customPipelineCache;
+    WGPUBuffer customTransformBuffer = nullptr;
+    WGPUBuffer customLightBuffer = nullptr;
+
     // Render info/statistics
     struct {
         size_t frame = 0;
@@ -1374,6 +1389,7 @@ struct DawnRenderer::Impl {
         lightBuffer     = makeBuffer("light_buf", 9, LIGHT_UNIFORM_SIZE);
     }
 
+    // NOTE: Texture upload/cache and geometry buffers are in DawnTextures and DawnGeometries.
     // Shadow map helpers
     void initShadowMap() {
         if (shadowState.depthTexture) return; // already initialized
@@ -2010,6 +2026,297 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
         }
     }
 
+    void renderCustomShaderObject(WGPURenderPassEncoder pass, Mesh* mesh,
+                                   ShaderMaterial* sm,
+                                   const Matrix4& projectionMatrix, const Matrix4& viewMatrix,
+                                   const Camera& camera) {
+        auto geometry = mesh->geometry();
+        if (!geometry || !geometry->hasAttribute("position")) return;
+
+        // Combine vertex + fragment shader into one module
+        std::string wgsl = sm->vertexShader + "\n" + sm->fragmentShader;
+
+        // Hash the shader source for cache invalidation
+        size_t shaderHash = std::hash<std::string>{}(wgsl);
+
+        auto it = customPipelineCache.find(sm);
+        bool needRebuild = (it == customPipelineCache.end() || it->second.shaderHash != shaderHash);
+
+        if (needRebuild) {
+            // Clean up old entry
+            if (it != customPipelineCache.end()) {
+                auto& old = it->second;
+                if (old.pipeline) wgpuRenderPipelineRelease(old.pipeline);
+                if (old.layout) wgpuPipelineLayoutRelease(old.layout);
+                if (old.bindGroupLayout) wgpuBindGroupLayoutRelease(old.bindGroupLayout);
+                if (old.shader) wgpuShaderModuleRelease(old.shader);
+            }
+
+            CustomPipelineEntry entry{};
+            entry.shaderHash = shaderHash;
+
+            // Create shader module
+            WGPUShaderSourceWGSL wgslSrc{};
+            wgslSrc.chain.sType = WGPUSType_ShaderSourceWGSL;
+            wgslSrc.chain.next = nullptr;
+            wgslSrc.code = {.data = wgsl.c_str(), .length = wgsl.size()};
+
+            WGPUShaderModuleDescriptor shaderDesc{};
+            shaderDesc.nextInChain = &wgslSrc.chain;
+            shaderDesc.label = {.data = "custom_shader", .length = 13};
+            entry.shader = wgpuDeviceCreateShaderModule(device, &shaderDesc);
+
+            // Build bind group layout entries
+            // Binding 0: TransformUniforms (256 bytes) — vertex + fragment
+            // Binding 1: LightData (704 bytes) — fragment
+            // Bindings 2+: user-defined (discovered from customTextures)
+            std::vector<WGPUBindGroupLayoutEntry> bglEntries;
+
+            { WGPUBindGroupLayoutEntry e{}; e.binding = 0;
+              e.visibility = WGPUShaderStage_Vertex | WGPUShaderStage_Fragment;
+              e.buffer.type = WGPUBufferBindingType_Uniform;
+              e.buffer.minBindingSize = TRANSFORM_UNIFORM_SIZE;
+              bglEntries.push_back(e); }
+
+            { WGPUBindGroupLayoutEntry e{}; e.binding = 1;
+              e.visibility = WGPUShaderStage_Fragment;
+              e.buffer.type = WGPUBufferBindingType_Uniform;
+              e.buffer.minBindingSize = LIGHT_UNIFORM_SIZE;
+              bglEntries.push_back(e); }
+
+            // Custom uniform buffer at binding 2 (for ocean params etc.)
+            bool hasCustomUniforms = false;
+            for (auto& [name, uniform] : sm->uniforms) {
+                if (uniform.hasValue()) {
+                    hasCustomUniforms = true;
+                    break;
+                }
+            }
+            if (hasCustomUniforms) {
+                WGPUBindGroupLayoutEntry e{}; e.binding = 2;
+                e.visibility = WGPUShaderStage_Vertex | WGPUShaderStage_Fragment;
+                e.buffer.type = WGPUBufferBindingType_Uniform;
+                e.buffer.minBindingSize = 256;
+                bglEntries.push_back(e);
+            }
+
+            // GPU texture bindings (texture + sampler pairs)
+            std::vector<std::string> texNames;
+            for (auto& [name, ptr] : sm->customTextures) {
+                texNames.push_back(name);
+            }
+            std::sort(texNames.begin(), texNames.end());
+
+            uint32_t nextBinding = hasCustomUniforms ? 3 : 2;
+            for (auto& name : texNames) {
+                { WGPUBindGroupLayoutEntry e{}; e.binding = nextBinding++;
+                  e.visibility = WGPUShaderStage_Vertex | WGPUShaderStage_Fragment;
+                  e.texture.sampleType = WGPUTextureSampleType_UnfilterableFloat;
+                  e.texture.viewDimension = WGPUTextureViewDimension_2D;
+                  bglEntries.push_back(e); }
+                { WGPUBindGroupLayoutEntry e{}; e.binding = nextBinding++;
+                  e.visibility = WGPUShaderStage_Vertex | WGPUShaderStage_Fragment;
+                  e.sampler.type = WGPUSamplerBindingType_NonFiltering;
+                  bglEntries.push_back(e); }
+            }
+
+            entry.bglEntries = bglEntries;
+
+            WGPUBindGroupLayoutDescriptor bglDesc{};
+            bglDesc.label = {.data = "custom_bgl", .length = 10};
+            bglDesc.entryCount = bglEntries.size();
+            bglDesc.entries = bglEntries.data();
+            entry.bindGroupLayout = wgpuDeviceCreateBindGroupLayout(device, &bglDesc);
+
+            WGPUPipelineLayoutDescriptor plDesc{};
+            plDesc.label = {.data = "custom_pl", .length = 9};
+            plDesc.bindGroupLayoutCount = 1;
+            plDesc.bindGroupLayouts = &entry.bindGroupLayout;
+            entry.layout = wgpuDeviceCreatePipelineLayout(device, &plDesc);
+
+            // Vertex buffer layout: pos(vec3) + normal(vec3) + uv(vec2) = 32 bytes
+            WGPUVertexAttribute attrs[3]{};
+            attrs[0].format = WGPUVertexFormat_Float32x3; attrs[0].offset = 0; attrs[0].shaderLocation = 0;
+            attrs[1].format = WGPUVertexFormat_Float32x3; attrs[1].offset = 12; attrs[1].shaderLocation = 1;
+            attrs[2].format = WGPUVertexFormat_Float32x2; attrs[2].offset = 24; attrs[2].shaderLocation = 2;
+
+            WGPUVertexBufferLayout vbLayout{};
+            vbLayout.arrayStride = dawn::VERTEX_STRIDE;
+            vbLayout.stepMode = WGPUVertexStepMode_Vertex;
+            vbLayout.attributeCount = 3;
+            vbLayout.attributes = attrs;
+
+            WGPUBlendState blendState{};
+            blendState.color.srcFactor = WGPUBlendFactor_SrcAlpha;
+            blendState.color.dstFactor = WGPUBlendFactor_OneMinusSrcAlpha;
+            blendState.color.operation = WGPUBlendOperation_Add;
+            blendState.alpha.srcFactor = WGPUBlendFactor_One;
+            blendState.alpha.dstFactor = WGPUBlendFactor_OneMinusSrcAlpha;
+            blendState.alpha.operation = WGPUBlendOperation_Add;
+
+            WGPUColorTargetState colorTarget{};
+            colorTarget.format = surfaceFormat;
+            colorTarget.writeMask = WGPUColorWriteMask_All;
+            colorTarget.blend = &blendState;
+
+            WGPUStringView fsEntry = {.data = "fs_main", .length = 7};
+            WGPUFragmentState fragmentState{};
+            fragmentState.module = entry.shader;
+            fragmentState.entryPoint = fsEntry;
+            fragmentState.targetCount = 1;
+            fragmentState.targets = &colorTarget;
+
+            WGPUDepthStencilState depthStencil{};
+            depthStencil.format = WGPUTextureFormat_Depth24Plus;
+            depthStencil.depthWriteEnabled = WGPUOptionalBool_True;
+            depthStencil.depthCompare = WGPUCompareFunction_Less;
+
+            WGPURenderPipelineDescriptor pipelineDesc{};
+            pipelineDesc.label = {.data = "custom_pipeline", .length = 15};
+            pipelineDesc.layout = entry.layout;
+
+            WGPUStringView vsEntry = {.data = "vs_main", .length = 7};
+            pipelineDesc.vertex.module = entry.shader;
+            pipelineDesc.vertex.entryPoint = vsEntry;
+            pipelineDesc.vertex.bufferCount = 1;
+            pipelineDesc.vertex.buffers = &vbLayout;
+            pipelineDesc.primitive.topology = WGPUPrimitiveTopology_TriangleList;
+            pipelineDesc.primitive.frontFace = WGPUFrontFace_CCW;
+            pipelineDesc.primitive.cullMode = WGPUCullMode_None;
+            pipelineDesc.depthStencil = &depthStencil;
+            pipelineDesc.multisample.count = 1;
+            pipelineDesc.multisample.mask = 0xFFFFFFFF;
+            pipelineDesc.fragment = &fragmentState;
+
+            entry.pipeline = wgpuDeviceCreateRenderPipeline(device, &pipelineDesc);
+
+            customPipelineCache[sm] = entry;
+        }
+
+        auto& pe = customPipelineCache[sm];
+
+        if (!customTransformBuffer) {
+            auto makeBuffer = [&](const char* name, size_t nameLen, size_t sz) {
+                WGPUBufferDescriptor d{};
+                d.label = {.data = name, .length = nameLen};
+                d.size = sz;
+                d.usage = WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst;
+                return wgpuDeviceCreateBuffer(device, &d);
+            };
+            customTransformBuffer = makeBuffer("custom_xform", 12, TRANSFORM_UNIFORM_SIZE);
+            customLightBuffer = makeBuffer("custom_light", 12, LIGHT_UNIFORM_SIZE);
+        }
+
+        // Upload transform uniforms
+        float transformData[TRANSFORM_UNIFORM_SIZE / sizeof(float)];
+        std::memset(transformData, 0, sizeof(transformData));
+        std::memcpy(transformData, mesh->matrixWorld->elements.data(), 64);
+        std::memcpy(transformData + 16, viewMatrix.elements.data(), 64);
+        std::memcpy(transformData + 32, projectionMatrix.elements.data(), 64);
+
+        Matrix4 modelView;
+        modelView.multiplyMatrices(viewMatrix, *mesh->matrixWorld);
+        Matrix3 normalMatrix;
+        normalMatrix.setFromMatrix4(modelView);
+        normalMatrix.invert();
+        normalMatrix.transpose();
+        auto& ne = normalMatrix.elements;
+        transformData[48] = ne[0]; transformData[49] = ne[1]; transformData[50] = ne[2]; transformData[51] = 0;
+        transformData[52] = ne[3]; transformData[53] = ne[4]; transformData[54] = ne[5]; transformData[55] = 0;
+        transformData[56] = ne[6]; transformData[57] = ne[7]; transformData[58] = ne[8]; transformData[59] = 0;
+
+        Vector3 camPos;
+        camPos.setFromMatrixPosition(*camera.matrixWorld);
+        transformData[60] = camPos.x;
+        transformData[61] = camPos.y;
+        transformData[62] = camPos.z;
+        transformData[63] = 0;
+
+        wgpuQueueWriteBuffer(queue, customTransformBuffer, 0, transformData, TRANSFORM_UNIFORM_SIZE);
+
+        // Build bind group entries
+        std::vector<WGPUBindGroupEntry> entries;
+        { WGPUBindGroupEntry e{}; e.binding = 0; e.buffer = customTransformBuffer; e.offset = 0; e.size = TRANSFORM_UNIFORM_SIZE; entries.push_back(e); }
+        { WGPUBindGroupEntry e{}; e.binding = 1; e.buffer = lightBuffer; e.offset = 0; e.size = LIGHT_UNIFORM_SIZE; entries.push_back(e); }
+
+        // Custom uniforms at binding 2
+        WGPUBuffer customUniformBuf = nullptr;
+        bool hasCustomUniforms = false;
+        for (auto& [name, uniform] : sm->uniforms) {
+            if (uniform.hasValue()) { hasCustomUniforms = true; break; }
+        }
+        if (hasCustomUniforms) {
+            float uboData[64];
+            std::memset(uboData, 0, sizeof(uboData));
+            int idx = 0;
+            for (auto& [name, uniform] : sm->uniforms) {
+                if (!uniform.hasValue()) continue;
+                auto& val = uniform.value();
+                if (auto* f = std::get_if<float>(&val)) {
+                    if (idx < 64) uboData[idx++] = *f;
+                } else if (auto* i = std::get_if<int>(&val)) {
+                    if (idx < 64) { float fi; std::memcpy(&fi, i, 4); uboData[idx++] = fi; }
+                } else if (auto* v3 = std::get_if<Vector3>(&val)) {
+                    if (idx + 3 <= 64) { uboData[idx] = v3->x; uboData[idx+1] = v3->y; uboData[idx+2] = v3->z; idx += 4; }
+                }
+            }
+            WGPUBufferDescriptor bd{};
+            bd.label = {.data = "custom_ubo", .length = 10};
+            bd.size = 256;
+            bd.usage = WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst;
+            customUniformBuf = wgpuDeviceCreateBuffer(device, &bd);
+            wgpuQueueWriteBuffer(queue, customUniformBuf, 0, uboData, 256);
+
+            WGPUBindGroupEntry e{}; e.binding = 2; e.buffer = customUniformBuf; e.offset = 0; e.size = 256;
+            entries.push_back(e);
+        }
+
+        // GPU texture bindings
+        std::vector<std::string> texNames;
+        for (auto& [name, ptr] : sm->customTextures) {
+            texNames.push_back(name);
+        }
+        std::sort(texNames.begin(), texNames.end());
+
+        uint32_t nextBinding = hasCustomUniforms ? 3 : 2;
+        for (auto& name : texNames) {
+            auto* gpuTex = static_cast<GPUTexture*>(sm->customTextures[name]);
+            { WGPUBindGroupEntry e{}; e.binding = nextBinding++; e.textureView = gpuTex->view(); entries.push_back(e); }
+            { WGPUBindGroupEntry e{}; e.binding = nextBinding++; e.sampler = gpuTex->sampler(); entries.push_back(e); }
+        }
+
+        WGPUBindGroupDescriptor bgDesc{};
+        bgDesc.label = {.data = "custom_bg", .length = 9};
+        bgDesc.layout = pe.bindGroupLayout;
+        bgDesc.entryCount = entries.size();
+        bgDesc.entries = entries.data();
+        WGPUBindGroup bg = wgpuDeviceCreateBindGroup(device, &bgDesc);
+
+        wgpuRenderPassEncoderSetPipeline(pass, pe.pipeline);
+        wgpuRenderPassEncoderSetBindGroup(pass, 0, bg, 0, nullptr);
+
+        auto& gb = geometries->getOrCreateGeometryBuffers(geometry.get());
+        if (gb.vertexBuffer) {
+            wgpuRenderPassEncoderSetVertexBuffer(pass, 0, gb.vertexBuffer, 0,
+                                                  gb.vertexCount * dawn::VERTEX_STRIDE);
+            if (gb.indexBuffer) {
+                wgpuRenderPassEncoderSetIndexBuffer(pass, gb.indexBuffer,
+                                                     WGPUIndexFormat_Uint32, 0,
+                                                     gb.indexCount * sizeof(uint32_t));
+                wgpuRenderPassEncoderDrawIndexed(pass, gb.indexCount, 1, 0, 0, 0);
+                renderInfo.calls++;
+                renderInfo.triangles += gb.indexCount / 3;
+            } else {
+                wgpuRenderPassEncoderDraw(pass, gb.vertexCount, 1, 0, 0);
+                renderInfo.calls++;
+                renderInfo.triangles += gb.vertexCount / 3;
+            }
+        }
+
+        wgpuBindGroupRelease(bg);
+        if (customUniformBuf) wgpuBufferRelease(customUniformBuf);
+    }
+
     // Collect all renderable objects into the render list with z-depth for sorting.
     // Mirrors GLRenderer's projectObject with frustum culling, LOD, Sprite, Line, Points support.
     void collectRenderables(Object3D& object, const Matrix4& projScreenMatrix,
@@ -2061,6 +2368,7 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
             }
         }
 
+        children:
         for (auto& child : object.children) {
             collectRenderables(*child, projScreenMatrix, camera, groupOrder);
         }
@@ -2679,6 +2987,17 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
         }
         pipelineCache.clear();
 
+        // Release custom shader pipeline cache
+        for (auto& [mat, pe] : customPipelineCache) {
+            if (pe.pipeline) wgpuRenderPipelineRelease(pe.pipeline);
+            if (pe.layout) wgpuPipelineLayoutRelease(pe.layout);
+            if (pe.bindGroupLayout) wgpuBindGroupLayoutRelease(pe.bindGroupLayout);
+            if (pe.shader) wgpuShaderModuleRelease(pe.shader);
+        }
+        customPipelineCache.clear();
+        if (customTransformBuffer) { wgpuBufferRelease(customTransformBuffer); customTransformBuffer = nullptr; }
+        if (customLightBuffer) { wgpuBufferRelease(customLightBuffer); customLightBuffer = nullptr; }
+
         disposeShadowMap();
 
         if (transformBuffer) wgpuBufferRelease(transformBuffer);
@@ -2836,6 +3155,18 @@ const DawnInfo& DawnRenderer::info() const {
     di.memory.geometries = pimpl_->renderInfo.geometries;
     di.memory.textures = pimpl_->renderInfo.textures;
     return di;
+}
+
+void* DawnRenderer::nativeDevice() const {
+    return pimpl_->device;
+}
+
+void* DawnRenderer::nativeQueue() const {
+    return pimpl_->queue;
+}
+
+void* DawnRenderer::nativeInstance() const {
+    return pimpl_->instance;
 }
 
 void DawnRenderer::resetState() {

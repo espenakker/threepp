@@ -547,6 +547,9 @@ if (THREEPP_WITH_DAWN)
             "threepp/renderers/DawnRenderer.cpp"
             "threepp/renderers/dawn/DawnGeometries.cpp"
             "threepp/renderers/dawn/DawnTextures.cpp"
+            "threepp/renderers/dawn/GPUTexture.cpp"
+            "threepp/renderers/dawn/GPUBuffer.cpp"
+            "threepp/renderers/dawn/ComputePipeline.cpp"
     )
     if (APPLE)
         list(APPEND sources
