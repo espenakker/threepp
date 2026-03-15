@@ -629,7 +629,7 @@ if (THREEPP_WITH_DAWN)
     include(${PROJECT_SOURCE_DIR}/cmake/FetchWgpuNative.cmake)
 
     target_include_directories(threepp PRIVATE "${WGPU_INCLUDE_DIR}")
-    target_link_libraries(threepp PRIVATE "${WGPU_LIBRARY}")
+    target_link_libraries(threepp PUBLIC ${WGPU_LIBRARY})
     target_compile_definitions(threepp PRIVATE THREEPP_WITH_DAWN=1)
 
     if (APPLE)

@@ -11,7 +11,7 @@ if (THREEPP_WITH_DAWN)
             "${WGPU_INCLUDE_DIR}"
     )
     target_link_libraries(CrossRenderer_test PRIVATE
-            "${WGPU_LIBRARY}"
+            ${WGPU_LIBRARY}
     )
     target_compile_definitions(CrossRenderer_test PRIVATE DATA_FOLDER="${PROJECT_SOURCE_DIR}/data")
 

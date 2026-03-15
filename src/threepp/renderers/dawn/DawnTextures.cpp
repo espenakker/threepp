@@ -117,13 +117,30 @@ TextureEntry& DawnTextures::getOrCreateTexture(Texture* tex) {
     entry.view = wgpuTextureCreateView(entry.texture, nullptr);
 
     auto& data = img.data<unsigned char>();
+
+    // Convert RGB to RGBA if needed
+    std::vector<unsigned char> rgba;
+    const unsigned char* srcData = data.data();
+    size_t srcSize = data.size();
+    if (data.size() == static_cast<size_t>(w) * h * 3) {
+        rgba.resize(static_cast<size_t>(w) * h * 4);
+        for (size_t i = 0; i < static_cast<size_t>(w) * h; i++) {
+            rgba[i * 4 + 0] = data[i * 3 + 0];
+            rgba[i * 4 + 1] = data[i * 3 + 1];
+            rgba[i * 4 + 2] = data[i * 3 + 2];
+            rgba[i * 4 + 3] = 255;
+        }
+        srcData = rgba.data();
+        srcSize = rgba.size();
+    }
+
     WGPUTexelCopyTextureInfo dst{};
     dst.texture = entry.texture;
     WGPUTexelCopyBufferLayout layout{};
     layout.bytesPerRow = w * 4;
     layout.rowsPerImage = h;
     WGPUExtent3D extent = {w, h, 1};
-    wgpuQueueWriteTexture(state_.queue, &dst, data.data(), data.size(), &layout, &extent);
+    wgpuQueueWriteTexture(state_.queue, &dst, srcData, srcSize, &layout, &extent);
 
     WGPUSamplerDescriptor sd{};
     sd.label = {.data = "tex_sampler", .length = 11};

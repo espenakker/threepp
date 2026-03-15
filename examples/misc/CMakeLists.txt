@@ -12,9 +12,7 @@ if (THREEPP_WITH_DAWN)
 
     # Standalone raw wgpu-native examples (do not use DawnRenderer)
     add_executable(dawn_ocean standalone/dawn_ocean.cpp)
-    target_link_libraries(dawn_ocean PRIVATE threepp "${WGPU_LIBRARY}" glfw
-        $<$<PLATFORM_ID:Windows>:ws2_32 ntdll d3dcompiler opengl32 userenv bcrypt ole32 propsys dxgi runtimeobject>
-    )
+    target_link_libraries(dawn_ocean PRIVATE threepp ${WGPU_LIBRARY} glfw)
     target_include_directories(dawn_ocean PRIVATE
         "${WGPU_INCLUDE_DIR}"
         "${PROJECT_SOURCE_DIR}/src/external/glfw/include"

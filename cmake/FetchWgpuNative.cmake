@@ -73,8 +73,16 @@ endif()
 # Export variables for the rest of the build
 set(WGPU_INCLUDE_DIR "${wgpu_native_SOURCE_DIR}/include" CACHE INTERNAL
     "wgpu-native include directory")
-set(WGPU_LIBRARY "${_wgpu_native_lib}" CACHE INTERNAL
-    "wgpu-native library path")
+
+# wgpu-native (Rust) static lib requires platform system libraries
+set(_wgpu_libs "${_wgpu_native_lib}")
+if(WIN32)
+    list(APPEND _wgpu_libs
+        ws2_32 ntdll d3dcompiler opengl32 userenv bcrypt
+        ole32 propsys dxgi runtimeobject)
+endif()
+set(WGPU_LIBRARY "${_wgpu_libs}" CACHE INTERNAL
+    "wgpu-native library path plus required system libraries")
 
 message(STATUS "wgpu-native: include = ${WGPU_INCLUDE_DIR}")
 message(STATUS "wgpu-native: library = ${WGPU_LIBRARY}")
