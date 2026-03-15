@@ -144,6 +144,17 @@ namespace {
     // Vertex colors bit
     constexpr uint32_t FEAT_VERTEX_COLORS = 1 << 21;
 
+    // Additional texture map features
+    constexpr uint32_t FEAT_EMISSIVE_MAP  = 1 << 22;
+    constexpr uint32_t FEAT_ROUGHNESS_MAP = 1 << 23;
+    constexpr uint32_t FEAT_METALNESS_MAP = 1 << 24;
+    constexpr uint32_t FEAT_AO_MAP        = 1 << 25;
+    constexpr uint32_t FEAT_ALPHA_MAP     = 1 << 26;
+    constexpr uint32_t FEAT_SPECULAR_MAP  = 1 << 27;
+    constexpr uint32_t FEAT_LIGHT_MAP    = 1 << 28;
+    constexpr uint32_t FEAT_SRGB_OUTPUT  = 1 << 29;
+    constexpr uint32_t FEAT_BUMP_MAP     = 1u << 30;
+
     constexpr uint32_t SHADOW_MAP_SIZE = 1024;
     constexpr size_t SHADOW_UNIFORM_SIZE = 80; // lightVP(64) + bias(4) + normalBias(4) + padding(8)
 
@@ -217,6 +228,39 @@ struct MaterialUniforms {
             s << "@group(0) @binding(6) var s_normalMap: sampler;\n";
         }
 
+        if (features & FEAT_EMISSIVE_MAP) {
+            s << "@group(0) @binding(10) var t_emissiveMap: texture_2d<f32>;\n";
+            s << "@group(0) @binding(11) var s_emissiveMap: sampler;\n";
+        }
+        if (features & FEAT_ROUGHNESS_MAP) {
+            s << "@group(0) @binding(12) var t_roughnessMap: texture_2d<f32>;\n";
+            s << "@group(0) @binding(13) var s_roughnessMap: sampler;\n";
+        }
+        if (features & FEAT_METALNESS_MAP) {
+            s << "@group(0) @binding(14) var t_metalnessMap: texture_2d<f32>;\n";
+            s << "@group(0) @binding(15) var s_metalnessMap: sampler;\n";
+        }
+        if (features & FEAT_AO_MAP) {
+            s << "@group(0) @binding(16) var t_aoMap: texture_2d<f32>;\n";
+            s << "@group(0) @binding(17) var s_aoMap: sampler;\n";
+        }
+        if (features & FEAT_ALPHA_MAP) {
+            s << "@group(0) @binding(18) var t_alphaMap: texture_2d<f32>;\n";
+            s << "@group(0) @binding(19) var s_alphaMap: sampler;\n";
+        }
+        if (features & FEAT_SPECULAR_MAP) {
+            s << "@group(0) @binding(20) var t_specularMap: texture_2d<f32>;\n";
+            s << "@group(0) @binding(21) var s_specularMap: sampler;\n";
+        }
+        if (features & FEAT_LIGHT_MAP) {
+            s << "@group(0) @binding(22) var t_lightMap: texture_2d<f32>;\n";
+            s << "@group(0) @binding(23) var s_lightMap: sampler;\n";
+        }
+        if (features & FEAT_BUMP_MAP) {
+            s << "@group(0) @binding(24) var t_bumpMap: texture_2d<f32>;\n";
+            s << "@group(0) @binding(25) var s_bumpMap: sampler;\n";
+        }
+
         if (features & FEAT_SHADOW) {
             s << R"(
 struct ShadowUniforms {
@@ -277,7 +321,9 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     var baseColor = material.diffuse.rgb;
-    let opacity = material.roughnessMetalnessOpacity.z;
+    var opacity = material.roughnessMetalnessOpacity.z;
+    var roughness = material.roughnessMetalnessOpacity.x;
+    var metalness = material.roughnessMetalnessOpacity.y;
 )";
         if (features & FEAT_VERTEX_COLORS) {
             s << "    baseColor = baseColor * in.vertexColor;\n";
@@ -286,6 +332,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         if (features & FEAT_TEXTURE) {
             s << "    let texColor = textureSample(t_diffuse, s_diffuse, in.uv);\n";
             s << "    baseColor = baseColor * texColor.rgb;\n";
+        }
+        if (features & FEAT_ROUGHNESS_MAP) {
+            s << "    roughness = roughness * textureSample(t_roughnessMap, s_roughnessMap, in.uv).g;\n";
+        }
+        if (features & FEAT_METALNESS_MAP) {
+            s << "    metalness = metalness * textureSample(t_metalnessMap, s_metalnessMap, in.uv).b;\n";
+        }
+        if (features & FEAT_ALPHA_MAP) {
+            s << "    opacity = opacity * textureSample(t_alphaMap, s_alphaMap, in.uv).r;\n";
         }
 
         if (lit) {
@@ -304,6 +359,24 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let normalScale = material.flags.zw;
     let scaledNm = vec3<f32>(nmSample.xy * normalScale, nmSample.z);
     let N = normalize(TBN * scaledNm);
+    let V = normalize(transform.cameraPos - in.worldPos);
+)";
+            } else if (features & FEAT_BUMP_MAP) {
+                // Bump map: perturb normal using height gradient via screen-space derivatives
+                s << R"(
+    let bmp_dPdx = dpdx(in.worldPos);
+    let bmp_dPdy = dpdy(in.worldPos);
+    let bmp_dUVdx = dpdx(in.uv);
+    let bmp_dUVdy = dpdy(in.uv);
+    let Hll = textureSample(t_bumpMap, s_bumpMap, in.uv).r;
+    let dBx = textureSample(t_bumpMap, s_bumpMap, in.uv + bmp_dUVdx).r - Hll;
+    let dBy = textureSample(t_bumpMap, s_bumpMap, in.uv + bmp_dUVdy).r - Hll;
+    let bumpScale = material.flags.y;
+    let geomN = normalize(in.worldNormal);
+    let crossX = cross(bmp_dPdy, geomN);
+    let crossY = cross(geomN, bmp_dPdx);
+    let surfGrad = (crossX * dBx + crossY * dBy) * bumpScale;
+    let N = normalize(in.worldNormal - surfGrad);
     let V = normalize(transform.cameraPos - in.worldPos);
 )";
             } else {
@@ -328,7 +401,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 // GGX/Trowbridge-Reitz NDF with Schlick Fresnel
                 s << "        { let H = normalize(L + V); let NdotH = max(dot(N, H), 0.0);\n";
                 s << "          let NdotV = max(dot(N, V), 0.001);\n";
-                s << "          let r = material.roughnessMetalnessOpacity.x; let m = material.roughnessMetalnessOpacity.y;\n";
+                s << "          let r = roughness; let m = metalness;\n";
                 s << "          let a = r * r; let a2 = a * a;\n";
                 s << "          let denom = NdotH * NdotH * (a2 - 1.0) + 1.0;\n";
                 s << "          let D = a2 / (3.14159265 * denom * denom);\n";
@@ -356,7 +429,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             }
             if (features & FEAT_PBR) {
                 s << "        { let H = normalize(L + V); let NdotH = max(dot(N, H), 0.0);\n";
-                s << "          let r = material.roughnessMetalnessOpacity.x; let m = material.roughnessMetalnessOpacity.y;\n";
+                s << "          let r = roughness; let m = metalness;\n";
                 s << "          let a = r * r; let a2 = a * a;\n";
                 s << "          let denom = NdotH * NdotH * (a2 - 1.0) + 1.0;\n";
                 s << "          let D = a2 / (3.14159265 * denom * denom);\n";
@@ -386,7 +459,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             }
             if (features & FEAT_PBR) {
                 s << "        { let H = normalize(L + V); let NdotH = max(dot(N, H), 0.0);\n";
-                s << "          let r = material.roughnessMetalnessOpacity.x; let m = material.roughnessMetalnessOpacity.y;\n";
+                s << "          let r = roughness; let m = metalness;\n";
                 s << "          let a = r * r; let a2 = a * a;\n";
                 s << "          let denom = NdotH * NdotH * (a2 - 1.0) + 1.0;\n";
                 s << "          let D = a2 / (3.14159265 * denom * denom);\n";
@@ -428,11 +501,41 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 )";
             }
 
-            if (features & FEAT_PBR) {
-                s << "    let metalness = material.roughnessMetalnessOpacity.y;\n";
-                s << "    baseColor = baseColor * (1.0 - metalness) * diffuseLight + specularLight + material.emissive.rgb;\n";
+            // Compute emissive contribution
+            if (features & FEAT_EMISSIVE_MAP) {
+                s << "    var emissiveColor = material.emissive.rgb * textureSample(t_emissiveMap, s_emissiveMap, in.uv).rgb;\n";
             } else {
-                s << "    baseColor = baseColor * diffuseLight + specularLight + material.emissive.rgb;\n";
+                s << "    var emissiveColor = material.emissive.rgb;\n";
+            }
+
+            // SpecularMap modulates specular light contribution
+            if (features & FEAT_SPECULAR_MAP) {
+                s << "    specularLight = specularLight * textureSample(t_specularMap, s_specularMap, in.uv).rgb;\n";
+            }
+
+            if (features & FEAT_PBR) {
+                s << "    baseColor = baseColor * (1.0 - metalness) * diffuseLight + specularLight + emissiveColor;\n";
+            } else {
+                s << "    baseColor = baseColor * diffuseLight + specularLight + emissiveColor;\n";
+            }
+
+            // LightMap adds baked illumination
+            if (features & FEAT_LIGHT_MAP) {
+                s << "    baseColor = baseColor + textureSample(t_lightMap, s_lightMap, in.uv).rgb;\n";
+            }
+
+            // AO map darkens ambient contribution
+            if (features & FEAT_AO_MAP) {
+                s << "    {\n";
+                s << "        let ao = textureSample(t_aoMap, s_aoMap, in.uv).r;\n";
+                s << "        let aoIntensity = material.flags.x;\n";
+                s << "        baseColor = baseColor * mix(1.0, ao, aoIntensity);\n";
+                s << "    }\n";
+            }
+        } else {
+            // Unlit path: emissiveMap still applies
+            if (features & FEAT_EMISSIVE_MAP) {
+                s << "    baseColor = baseColor + material.emissive.rgb * textureSample(t_emissiveMap, s_emissiveMap, in.uv).rgb;\n";
             }
         }
 
@@ -468,6 +571,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             s << "        let fogFactor = exp(-fogDensity * fogDensity * fogDist * fogDist);\n";
             s << "        baseColor = mix(material.fogColor.rgb, baseColor, clamp(fogFactor, 0.0, 1.0));\n";
             s << "    }\n";
+        }
+
+        // sRGB output encoding (linear to sRGB gamma)
+        if (features & FEAT_SRGB_OUTPUT) {
+            s << "    baseColor = pow(baseColor, vec3<f32>(1.0 / 2.2));\n";
         }
 
         s << "    return vec4<f32>(baseColor, opacity);\n}\n";
@@ -878,6 +986,28 @@ struct DawnRenderer::Impl {
               e.sampler.type = WGPUSamplerBindingType_Filtering;
               bglEntries.push_back(e); }
         }
+
+        // Helper lambda to add texture+sampler binding pair
+        auto addTexSamplerBindings = [&](uint32_t texBinding, uint32_t sampBinding) {
+            { WGPUBindGroupLayoutEntry e{}; e.binding = texBinding;
+              e.visibility = WGPUShaderStage_Fragment;
+              e.texture.sampleType = WGPUTextureSampleType_Float;
+              e.texture.viewDimension = WGPUTextureViewDimension_2D;
+              bglEntries.push_back(e); }
+            { WGPUBindGroupLayoutEntry e{}; e.binding = sampBinding;
+              e.visibility = WGPUShaderStage_Fragment;
+              e.sampler.type = WGPUSamplerBindingType_Filtering;
+              bglEntries.push_back(e); }
+        };
+
+        if (features & FEAT_EMISSIVE_MAP)  addTexSamplerBindings(10, 11);
+        if (features & FEAT_ROUGHNESS_MAP) addTexSamplerBindings(12, 13);
+        if (features & FEAT_METALNESS_MAP) addTexSamplerBindings(14, 15);
+        if (features & FEAT_AO_MAP)        addTexSamplerBindings(16, 17);
+        if (features & FEAT_ALPHA_MAP)     addTexSamplerBindings(18, 19);
+        if (features & FEAT_SPECULAR_MAP)  addTexSamplerBindings(20, 21);
+        if (features & FEAT_LIGHT_MAP)     addTexSamplerBindings(22, 23);
+        if (features & FEAT_BUMP_MAP)      addTexSamplerBindings(24, 25);
 
         WGPUBindGroupLayoutDescriptor bglDesc{};
         WGPUStringView bglLabel = {.data = "bind_group_layout", .length = 17};
@@ -1754,7 +1884,17 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
         Color emissive(0, 0, 0);
         Texture* diffuseMap = nullptr;
         Texture* normalMap = nullptr;
+        Texture* emissiveMap = nullptr;
+        Texture* roughnessMap = nullptr;
+        Texture* metalnessMap = nullptr;
+        Texture* aoMap = nullptr;
+        Texture* alphaMap = nullptr;
+        Texture* specularMap = nullptr;
+        Texture* lightMap = nullptr;
+        Texture* bumpMap = nullptr;
         Vector2 normalScale(1, 1);
+        float aoMapIntensity = 1.0f;
+        float bumpScale = 1.0f;
 
         if (auto m = dynamic_cast<MeshStandardMaterial*>(rawMat)) {
             features |= FEAT_LIGHTING | FEAT_PBR;
@@ -1766,11 +1906,25 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
                 normalScale = m->normalScale;
                 features |= FEAT_NORMAL_MAP;
             }
+            if (m->emissiveMap) { emissiveMap = m->emissiveMap.get(); features |= FEAT_EMISSIVE_MAP; }
+            if (m->roughnessMap) { roughnessMap = m->roughnessMap.get(); features |= FEAT_ROUGHNESS_MAP; }
+            if (m->metalnessMap) { metalnessMap = m->metalnessMap.get(); features |= FEAT_METALNESS_MAP; }
+            if (m->aoMap) { aoMap = m->aoMap.get(); aoMapIntensity = m->aoMapIntensity; features |= FEAT_AO_MAP; }
+            if (m->alphaMap) { alphaMap = m->alphaMap.get(); features |= FEAT_ALPHA_MAP; }
+            if (m->lightMap) { lightMap = m->lightMap.get(); features |= FEAT_LIGHT_MAP; }
+            if (m->bumpMap) { bumpMap = m->bumpMap.get(); bumpScale = m->bumpScale; features |= FEAT_BUMP_MAP; }
         } else if (auto m = dynamic_cast<MeshPhongMaterial*>(rawMat)) {
             features |= FEAT_LIGHTING | FEAT_SPECULAR;
             diffuse = m->color; specularColor = m->specular; shininess = m->shininess;
             emissive = m->emissive;
             if (m->map) { diffuseMap = m->map.get(); features |= FEAT_TEXTURE; }
+            if (m->normalMap) { normalMap = m->normalMap.get(); normalScale = m->normalScale; features |= FEAT_NORMAL_MAP; }
+            if (m->emissiveMap) { emissiveMap = m->emissiveMap.get(); features |= FEAT_EMISSIVE_MAP; }
+            if (m->aoMap) { aoMap = m->aoMap.get(); aoMapIntensity = m->aoMapIntensity; features |= FEAT_AO_MAP; }
+            if (m->alphaMap) { alphaMap = m->alphaMap.get(); features |= FEAT_ALPHA_MAP; }
+            if (m->specularMap) { specularMap = m->specularMap.get(); features |= FEAT_SPECULAR_MAP; }
+            if (m->lightMap) { lightMap = m->lightMap.get(); features |= FEAT_LIGHT_MAP; }
+            if (m->bumpMap) { bumpMap = m->bumpMap.get(); bumpScale = m->bumpScale; features |= FEAT_BUMP_MAP; }
         } else if (auto m = dynamic_cast<MeshLambertMaterial*>(rawMat)) {
             features |= FEAT_LIGHTING;
             diffuse = m->color;
@@ -1840,11 +1994,14 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
             features |= FEAT_SHADOW;
         }
 
-        // Fog and tone mapping
+        // Fog, tone mapping, and output encoding
         if (rawMat->fog) {
             features |= fogBits;
         }
         features |= tonemapBits;
+        if (scope.outputEncoding == Encoding::sRGB) {
+            features |= FEAT_SRGB_OUTPUT;
+        }
 
         // Get/create pipeline for this feature set
         auto& pe = getOrCreatePipeline(features);
@@ -1884,8 +2041,8 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
         matData[4] = specularColor.r; matData[5] = specularColor.g; matData[6] = specularColor.b; matData[7] = shininess;
         matData[8] = roughness; matData[9] = metalness; matData[10] = opacity; matData[11] = 0;
         matData[12] = emissive.r; matData[13] = emissive.g; matData[14] = emissive.b; matData[15] = 0;
-        matData[16] = (features & FEAT_TEXTURE) ? 1.0f : 0.0f;
-        matData[17] = (features & FEAT_LIGHTING) ? 1.0f : 0.0f;
+        matData[16] = aoMapIntensity;  // flags.x: aoMapIntensity
+        matData[17] = bumpScale;       // flags.y: bumpScale
         matData[18] = normalScale.x;
         matData[19] = normalScale.y;
         // fogColor (vec4, offset 20)
@@ -1930,6 +2087,22 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
             { WGPUBindGroupEntry e{}; e.binding = 8; e.textureView = shadowState.depthView; entries.push_back(e); }
             { WGPUBindGroupEntry e{}; e.binding = 9; e.sampler = shadowState.comparisonSampler; entries.push_back(e); }
         }
+
+        // Helper lambda to add texture bind group entries
+        auto addTexEntries = [&](uint32_t texBinding, uint32_t sampBinding, Texture* tex) {
+            auto* te = tex ? &textures->getOrCreateTexture(tex) : &textures->getDummyTexture();
+            { WGPUBindGroupEntry e{}; e.binding = texBinding; e.textureView = te->view; entries.push_back(e); }
+            { WGPUBindGroupEntry e{}; e.binding = sampBinding; e.sampler = te->sampler; entries.push_back(e); }
+        };
+
+        if (features & FEAT_EMISSIVE_MAP)  addTexEntries(10, 11, emissiveMap);
+        if (features & FEAT_ROUGHNESS_MAP) addTexEntries(12, 13, roughnessMap);
+        if (features & FEAT_METALNESS_MAP) addTexEntries(14, 15, metalnessMap);
+        if (features & FEAT_AO_MAP)        addTexEntries(16, 17, aoMap);
+        if (features & FEAT_ALPHA_MAP)     addTexEntries(18, 19, alphaMap);
+        if (features & FEAT_SPECULAR_MAP)  addTexEntries(20, 21, specularMap);
+        if (features & FEAT_LIGHT_MAP)     addTexEntries(22, 23, lightMap);
+        if (features & FEAT_BUMP_MAP)      addTexEntries(24, 25, bumpMap);
 
         WGPUBindGroupDescriptor bgDesc{};
         bgDesc.label = {.data = "obj_bg", .length = 6};
