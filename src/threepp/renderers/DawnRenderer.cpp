@@ -2027,6 +2027,12 @@ struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3
         auto geometry = mesh->geometry();
         if (!geometry || !geometry->hasAttribute("position")) return;
 
+        // Skip GLSL shaders — Dawn requires WGSL
+        if (sm->vertexShader.find("gl_Position") != std::string::npos ||
+            sm->fragmentShader.find("gl_FragColor") != std::string::npos) {
+            return;
+        }
+
         // Combine vertex + fragment shader into one module
         std::string wgsl = sm->vertexShader + "\n" + sm->fragmentShader;
 

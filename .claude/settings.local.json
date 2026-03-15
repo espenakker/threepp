@@ -22,7 +22,8 @@
       "Bash(timeout 8 ./build/bin/Release/webtide.exe:*)",
       "Bash(timeout 5 ./build/bin/Release/webtide.exe:*)",
       "Bash(timeout 3 ./build/bin/Release/webtide.exe:*)",
-      "Bash(powershell:*)"
+      "Bash(powershell:*)",
+      "Bash(bin/Debug/CrossRenderer_test.exe:*)"
     ]
   }
 }

@@ -48,10 +48,11 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(wgpu_native)
 
-# Locate the static library inside the fetched content
-# Prefer the static library to avoid runtime dependency on libwgpu_native.so
+# Locate the library inside the fetched content
+# On Windows, use the DLL import library to avoid LNK1190 errors from
+# Rust-compiled objects in the static lib. On other platforms, use the static lib.
 if(WIN32)
-    set(_wgpu_lib_name "wgpu_native.lib")
+    set(_wgpu_lib_name "wgpu_native.dll.lib")
 else()
     set(_wgpu_lib_name "libwgpu_native.a")
 endif()
@@ -74,7 +75,8 @@ endif()
 set(WGPU_INCLUDE_DIR "${wgpu_native_SOURCE_DIR}/include" CACHE INTERNAL
     "wgpu-native include directory")
 
-# wgpu-native (Rust) static lib requires platform system libraries
+# On Windows, link against the DLL import lib; on other platforms the static lib
+# needs platform system libraries.
 set(_wgpu_libs "${_wgpu_native_lib}")
 if(WIN32)
     list(APPEND _wgpu_libs
@@ -83,6 +85,12 @@ if(WIN32)
 endif()
 set(WGPU_LIBRARY "${_wgpu_libs}" CACHE INTERNAL
     "wgpu-native library path plus required system libraries")
+
+# On Windows, copy the DLL next to built executables so they can find it at runtime
+if(WIN32)
+    set(WGPU_NATIVE_DLL "${wgpu_native_SOURCE_DIR}/lib/wgpu_native.dll"
+        CACHE INTERNAL "Path to wgpu_native.dll")
+endif()
 
 message(STATUS "wgpu-native: include = ${WGPU_INCLUDE_DIR}")
 message(STATUS "wgpu-native: library = ${WGPU_LIBRARY}")
