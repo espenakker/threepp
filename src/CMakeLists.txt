@@ -542,6 +542,9 @@ endif ()
 if (THREEPP_WITH_DAWN)
     list(APPEND sources
             "threepp/renderers/DawnRenderer.cpp"
+            "threepp/renderers/dawn/GPUTexture.cpp"
+            "threepp/renderers/dawn/GPUBuffer.cpp"
+            "threepp/renderers/dawn/ComputePipeline.cpp"
     )
     if (APPLE)
         list(APPEND sources

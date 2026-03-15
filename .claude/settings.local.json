@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls:*)",
+      "Bash(cmake .:*)",
+      "Bash(cmake:*)",
+      "Bash(ar t:*)",
+      "Bash(python:*)",
+      "Bash(gh release:*)",
+      "WebFetch(domain:api.github.com)",
+      "Bash(curl:*)",
+      "Bash(unzip:*)",
+      "Bash(cp:*)",
+      "Bash(rm:*)",
+      "Bash(ctest:*)",
+      "Bash(timeout 8 build/bin/Release/webtide.exe:*)",
+      "Bash(RUST_BACKTRACE=1 ./build/bin/Release/webtide.exe:*)",
+      "Bash(RUST_BACKTRACE=1 timeout 10 ./build/bin/Release/webtide.exe:*)"
+    ]
+  }
+}

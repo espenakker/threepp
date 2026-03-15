@@ -70,6 +70,16 @@ namespace threepp {
 
         [[nodiscard]] const DawnInfo& info() const;
 
+        /// Access the underlying WGPUDevice handle (type-erased).
+        /// Cast with static_cast<WGPUDevice>(renderer.nativeDevice()).
+        [[nodiscard]] void* nativeDevice() const;
+
+        /// Access the underlying WGPUQueue handle (type-erased).
+        [[nodiscard]] void* nativeQueue() const;
+
+        /// Access the underlying WGPUInstance handle (type-erased).
+        [[nodiscard]] void* nativeInstance() const;
+
         void resetState();
         void dispose() override;
 
