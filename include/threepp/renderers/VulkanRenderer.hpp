@@ -35,13 +35,16 @@
 #include <vector>
 
 namespace threepp {
+    class DisplacedMesh;
 
     class Mesh;
     class ParticleField;
+    class DisplacedMesh;
 
     class VulkanRenderer: public Renderer {
 
     public:
+        void writeMeshAudit(const DisplacedMesh& dm, const std::string& prefix);
         explicit VulkanRenderer(Canvas& canvas);
 
         ~VulkanRenderer() override;
@@ -100,6 +103,10 @@ namespace threepp {
         // a HUD pass BEFORE the readback, a later one is skipped with a one-time
         // hint. For a copy of the scene without overlays use readSceneRGBPixels().
         [[nodiscard]] std::vector<unsigned char> readRGBPixels() override;
+        // Opt-in sea-query audit, after readRGBPixels has submitted the frame.
+        // Each record: rest x,z; actual GPU mesh x,y,z. Local ocean coordinates.
+        // Synchronizes GPU/host; empty unless KRV_SEA_QUERY_AUDIT is exactly 1.
+        [[nodiscard]] std::vector<std::array<float,5>> readSeaQueryVertices(const DisplacedMesh& mesh);
 
         // Save that same image to disk (.png/.jpg/.jpeg/.bmp), creating parent
         // dirs as needed. Wraps readRGBPixels(); call after render().
@@ -411,6 +418,26 @@ namespace threepp {
         // stamps their measurements (see extras/sensors/Sensor.hpp).
         void setSimTime(double seconds);
 
+        // Opt-in ocean diagnostics. No simulation/physics consumer reads this state.
+        struct OceanInspectSample {
+            uint64_t hullAddress = 0, wakeTrailAddress = 0;
+            float tile[3] = {}, waveScale = 1, choppiness = 1, seaY = 0;
+            uint32_t cascadeMask = 0, hullCount = 0;
+            float coarseFold = 0, fineFold = 0, foamTile = 0;
+            uint32_t foamRes = 0;
+            int32_t pixelX = -1, pixelY = -1;
+            uint32_t valid = 0, renderWidth = 0, renderHeight = 0;
+            float worldX = 0, worldZ = 0, height = 0, slope = 0, jacobian = 1;
+            float restX = 0, restZ = 0, foam = 0, banked = 0, fineKernel = 0;
+            float wake[4] = {}, radiation = 0, value = 0;
+            float coarseJ = 1, fineJ = 1, coarseThreshold = 1, fineThreshold = 1;
+            int32_t displayX = -1, displayY = -1;
+        };
+        void setOceanInspect(uint32_t field, uint32_t solo = 0, int x = -1, int y = -1);
+        [[nodiscard]] bool readOceanInspect(OceanInspectSample& sample);
+        void setOceanInspectFrozen(bool frozen);
+
+
         // Hard restart of every temporal accumulator, on every live view: the
         // TAA history, the reprojection validity of the deferred shade's
         // per-frame histories (GI, shadow, reflections, volumetric fog) and the
@@ -435,6 +462,20 @@ namespace threepp {
         // The TAA input is frame-local scratch whose memory later passes
         // reuse, so by the time a frame completes it holds their data; run
         // with THREEPP_VK_NO_ALIAS=1 to read the image itself.
+        // The ocean's world-foam accumulator (foam_world.comp's R32F image) as the last
+        // completed frame left it: res x res floats, row-major, texel (i, j) at world XZ
+        // ((i, j) + 0.5) * tileSize / res. Synchronous (waits for the device idle): for
+        // audits, not per frame. False when the mesh has no foam image yet.
+        bool readOceanFoam(const DisplacedMesh& mesh, std::vector<float>& out, uint32_t& res, float& tileSize);
+        // KRV_FOAM_DIAGNOSTICS: RGBA32F from the last positive-dt update;
+        // accumulator, added foam, non-feedback forcing/s, coarse/fine event bits.
+        bool readOceanFoamDiagnostics(const DisplacedMesh& mesh, std::vector<float>& out, uint32_t& res,
+                                      float& tileSize, float& time, float& dt);
+
+        // Rain falling on the water (mm/h; 0 = none): the deferred shade damps the short waves and draws the drops'
+        // ring ripples where a pixel resolves them, their slope banked as roughness where it does not.
+        void setRainRate(float mmPerHour);
+
         bool readTaaDebugImages(std::vector<uint8_t>& input, int& inW, int& inH,
                                 std::vector<uint8_t>& history, int& histW, int& histH);
 
@@ -636,6 +677,13 @@ namespace threepp {
         // (equivalent to THREEPP_DENOISE=0), NOT a quality/perf dial. Probe GI
         // requires it ON.
         void setDenoise(bool enabled);
+        // The denoiser's SVGF history feedback: the spatially filtered GI and shadow ratio written back as the
+        // next frame's temporal history, so a freshly disoccluded region converges in a few frames under motion
+        // (default on). Off, each history is the raw temporal accumulation alone. A renderer that converges every
+        // instant over many frames at a fixed time (offline shots: N settle frames per frame) gains nothing from
+        // it and loses stability: re-injecting a neighbourhood mean every frame made a small bright moving
+        // object's shading walk by several percent from instant to instant (denoise_antilag).
+        void setDenoiseFeedback(bool enabled);
         [[nodiscard]] bool denoise() const;
 
         // Per-NEE-sample firefly clamp used by the deferred highlight suppress.
@@ -1775,6 +1823,10 @@ namespace threepp {
             float baseY       = 0.0f;
             float falloff     = 80.0f;// exponential height scale (m)
             float noiseAmount = 0.6f; // 0 = smooth analytic, 1 = fully noise-modulated
+            // true: scene.fog's density stays on as a UNIFORM haze under this layer (sigma =
+            // haze + layer), instead of the layer's density overriding it. A marine mist or spray
+            // layer over the day's haze. Needs density > 0 and a scene.fog.
+            bool  keepSceneFog = false;
         };
         void setHeightFog(const std::optional<HeightFogSettings>& settings);
         [[nodiscard]] std::optional<HeightFogSettings> heightFog() const;

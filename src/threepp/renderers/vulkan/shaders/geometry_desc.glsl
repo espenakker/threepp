@@ -21,6 +21,7 @@ struct GeometryDesc {
                    // bit 4: the index buffer is uint16 (gfetchTri),
                    // bit 5: the rays see a coarser proxy of this mesh (shadeWater),
                    // bit 6: emissive glows but is not a light (not in the emitter list)
+                   // bits 8..15: renderer semantic class, opt-in reflhits AOV only
 };
 
 #endif// GEOMETRY_DESC_GLSL

@@ -2681,6 +2681,14 @@ void VulkanRenderer::Impl::recordDisplacedDeform(VkCommandBuffer cb, DisplacedMe
         }
 
 void VulkanRenderer::Impl::recordDisplacedUpdate(VkCommandBuffer cb, DisplacedMesh& dm, DisplacedMeshState& st, float elapsedSeconds, bool timed) {
+            // A frozen orbit must not re-inject disturbances/foam or advance wake histories.
+            // The last ocean buffers remain valid; only the camera changes.
+            if (inspectFrozen_) {
+                const double now = frameNowSec();
+                auto it = inspectFrozenOceanTimes_.find(&dm);
+                if (it != inspectFrozenOceanTimes_.end() && it->second == now) return;
+                inspectFrozenOceanTimes_[&dm] = now;
+            }
 
             // (0) Live sea state. The Phillips h0 pass is normally one-shot,
             // but windSpeed/windTheta/fetch are plain Params fields — when
@@ -2817,6 +2825,8 @@ void VulkanRenderer::Impl::recordDisplacedUpdate(VkCommandBuffer cb, DisplacedMe
                 c.ifft->recordApply(cb, dsp, st.scratchA);
                 }
 
+                if(c.filter) c.filter->record(cb,c.tileSize,dm.params.waveScale);
+
                 // Copy the spatial-domain height image into THIS FRAME's slot
                 // of the host-mapped readback ring for this cascade (slot =
                 // currentFrame; DisplacedMeshState::heightReadback says why it
@@ -2933,7 +2943,7 @@ void VulkanRenderer::Impl::recordDisplacedUpdate(VkCommandBuffer cb, DisplacedMe
                 bmb[0].sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
                 bmb[0].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
                 bmb[0].dstAccessMask = VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT |
-                                       VK_ACCESS_SHADER_READ_BIT;
+                                       VK_ACCESS_SHADER_READ_BIT | (dm.cdlod ? VK_ACCESS_SHADER_WRITE_BIT : 0u);
                 bmb[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
                 bmb[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
                 bmb[0].buffer = st.blas->prevVertex.handle;
@@ -3047,6 +3057,23 @@ void VulkanRenderer::Impl::recordDisplacedUpdate(VkCommandBuffer cb, DisplacedMe
                 g.centerY      = he.centerY;
                 g.pitch        = he.pitch;
                 g.roll         = he.roll;
+                g.radEnabled   = he.radEnabled;
+                g.radOmega     = he.radOmega;
+                g.radK         = he.radK;
+                g.radAbar      = he.radAbar;
+                g.radDraught   = he.radDraught;
+                g.radPhase     = he.radPhase;
+                g.radHeaveRe   = he.radHeaveRe;
+                g.radHeaveIm   = he.radHeaveIm;
+                g.radRollRe    = he.radRollRe;
+                g.radRollIm    = he.radRollIm;
+                g.radPitchRe   = he.radPitchRe;
+                g.radPitchIm   = he.radPitchIm;
+                g.refR         = he.refR;
+                g.refK         = he.refK;
+                g.refDirX      = he.refDirX;
+                g.refDirZ      = he.refDirZ;
+                g.radBand      = he.radBand;
                 g.trailFirst   = hullCount * DisplacedMeshState::kMaxWakeSamples;
                 g.trailCount   = static_cast<uint32_t>(std::min<size_t>(
                         wk.trail.size(), DisplacedMeshState::kMaxWakeSamples));
@@ -3108,6 +3135,131 @@ void VulkanRenderer::Impl::recordDisplacedUpdate(VkCommandBuffer cb, DisplacedMe
             pc.wakeTrailAddr  = wakeTrailAddr;
             pc.hullAddr       = hullAddr;
             pc.hullCount      = hullCount;
+            const char* horizonVis = std::getenv("KRV_REFL_HORIZON_VIS");
+            if (inspectMode_ != 0 || inspectFrozen_ || (horizonVis && std::string(horizonVis) == "1")) {
+                inspectOcean_.hullAddress = hullAddr;
+                inspectOcean_.wakeTrailAddress = wakeTrailAddr;
+                inspectOcean_.hullCount = hullCount;
+                inspectOcean_.tile[0] = pc.tileSize0; inspectOcean_.tile[1] = pc.tileSize1; inspectOcean_.tile[2] = pc.tileSize2;
+                inspectOcean_.waveScale = pc.waveScale; inspectOcean_.choppiness = pc.choppiness;
+                // Displacement/hull planes are local to the ocean; reflected
+                // ray origins are world-space (a sea can sit at -6.65 m).
+                inspectOcean_.seaY = dm.matrixWorld->elements[13];
+                inspectOcean_.cascadeMask = pc.cascadeMask;
+                for (unsigned i=0; i<3; ++i) if (inspectOcean_.tile[i] <= 0.f) inspectOcean_.cascadeMask &= ~(1u<<i);
+                inspectOcean_.coarseFold = dm.params.foamCoarseFold; inspectOcean_.fineFold = dm.params.foamFineFold;
+                inspectOcean_.foamTile = st.foamTileSize; inspectOcean_.foamRes = st.foamRes;
+            }
+
+            if (dm.skirt.rings > 0u && st.gridDimX > 2u * dm.skirt.rings + 1u) {
+                // the ring growth q that takes the skirt from the inner edge (whose
+                // spacing ring 1 continues) out to `reach`: s0 (q^M - 1) / (q - 1) = W
+                const uint32_t M = dm.skirt.rings, nX = st.gridDimX - 2u * M;
+                const bool warped = dm.warp.halfRange > 0.f;
+                const float a = warped ? dm.warp.coefA : 1.f;
+                const float hR = warped ? dm.warp.halfRange : 0.5f * st.planeSizeX * float(nX - 1u) / float(st.gridDimX - 1u);
+                const double s0 = (a + 3.0 * (1.0 - a)) * 2.0 / double(nX - 1u), W = std::max(0.0, double(dm.skirt.reach) / hR - 1.0);
+                double lo = 1.0 + 1e-9, hi = 4.0;
+                for (int it = 0; it < 80; ++it) {
+                    const double q = 0.5 * (lo + hi);
+                    (s0 * (std::pow(q, double(M)) - 1.0) / (q - 1.0) < W ? lo : hi) = q;
+                }
+                const float q = float(0.5 * (lo + hi));
+                pc.skirtRings   = M;
+                pc.skirtGrowth  = q;
+                pc.skirtFade0   = dm.skirt.fadeSpacing0;
+                pc.skirtFade1   = dm.skirt.fadeSpacing1;
+                pc.skirtInvTwoR = dm.skirt.earthRadius > 0.f ? 0.5f / dm.skirt.earthRadius : 0.f;
+                // spacing grows linearly with the Chebyshev distance d past the edge:
+                // spacing(d) = hR s0 + (d - hR)(q - 1)
+                auto dAt = [&](float sp) { return hR + std::max(0.f, sp - hR * float(s0)) / std::max(q - 1.f, 1e-6f); };
+                oceanSkirt[0] = warped ? dm.warp.centerX : 0.f;
+                oceanSkirt[1] = warped ? dm.warp.centerZ : 0.f;
+                oceanSkirt[2] = dAt(dm.skirt.fadeSpacing0);
+                oceanSkirt[3] = dAt(dm.skirt.fadeSpacing1);
+                oceanSkirt[4] = dm.skirt.mss;
+            }
+            if (dm.cdlod) {
+                using namespace threepp::oceanlod;
+                const auto selected = select(dm.lodEyeX,dm.lodEyeZ,dm.lodEyeHeight);
+                // KRV_CDLOD_LOG=1: the patches per level, whenever the count changes
+                if (static const bool lodLog=std::getenv("KRV_CDLOD_LOG")!=nullptr; lodLog) {
+                    static size_t lastCount=0;
+                    if (selected.size()!=lastCount) {
+                        lastCount=selected.size();
+                        std::map<float,unsigned> perLevel;
+                        for (const auto& p:selected) ++perLevel[p.spacing];
+                        std::fprintf(stderr,"cdlod: %zu patches of %u (reach %.0f cells, eye %.1f %.1f h %.1f):",selected.size(),slots,fineReach(),dm.lodEyeX,dm.lodEyeZ,dm.lodEyeHeight);
+                        for (const auto& kv:perLevel) if (kv.first<=8.f) std::fprintf(stderr," %gm:%u",kv.first,kv.second);
+                        std::fprintf(stderr,"\n");
+                    }
+                }
+                std::map<std::array<float,3>, Patch> wanted;
+                for (const auto& p:selected) wanted[{p.x,p.z,p.spacing}]=p;
+                const bool firstLayout=st.lodHomes.empty();
+                if (firstLayout) st.lodHomes.resize(slots,{0,0,0});
+                for (auto it=st.lodSlots.begin();it!=st.lodSlots.end();) {
+                    if (!wanted.count(it->first)) {
+                        it=st.lodSlots.erase(it);
+                    } else ++it;
+                }
+                std::vector<bool> used(slots,false);
+                for (const auto& kv:st.lodSlots) used[kv.second]=true;
+                std::vector<bool> fresh(slots,false);
+                float maxRelocation=0.f;
+                for (const auto& kv:wanted) if (!st.lodSlots.count(kv.first)) {
+                    unsigned next=slots; float best=1e30f;
+                    const auto& p=kv.second;
+                    for(unsigned j=0;j<slots;++j) if(!used[j]) {
+                        const auto& h=st.lodHomes[j];
+                        const float dx=h[0]+8.f*h[2]-p.x-8.f*p.spacing;
+                        const float dz=h[1]+8.f*h[2]-p.z-8.f*p.spacing;
+                        const float cost=h[2]>0.f ? dx*dx+dz*dz : 1e20f+float(j)*1e15f;
+                        if(cost<best){best=cost;next=j;}
+                    }
+                    if(!firstLayout) maxRelocation=std::max(maxRelocation,
+                        st.lodHomes[next][2]>0.f ? std::sqrt(best) : 1e30f);
+                    st.lodHomes[next]=kv.first;
+                    st.lodSlots[kv.first]=next; used[next]=true; fresh[next]=true;
+                }
+                // Place spare degenerate slots throughout the initial domain.
+                // They can then be reused locally without a cold allocation
+                // moving a BVH leaf from the scene origin to the camera.
+                if(firstLayout) for(unsigned j=0;j<slots;++j) if(!used[j]) {
+                    const auto& p=selected[(j*37u)%selected.size()];
+                    st.lodHomes[j]={p.x,p.z,p.spacing};
+                }
+                // Local reassignment preserves useful BVH partitions. A camera
+                // teleport still rebuilds immediately; otherwise the existing
+                // periodic BUILD bounds accumulation of refit degradation.
+                if (firstLayout || maxRelocation>2048.f)
+                    st.blasRefitCounter=DisplacedMeshState::kBlasFullRebuildInterval;
+                std::vector<Patch> patches(slots,Patch{0,0,0,0});
+                // Retired slots degenerate at their last home, preserving spatial
+                // BVH partitions instead of dragging every retired primitive to zero.
+                for(unsigned j=0;j<slots;++j) patches[j]={st.lodHomes[j][0],st.lodHomes[j][1],0,0};
+                for (const auto& kv:st.lodSlots) {
+                    patches[kv.second]=wanted.at(kv.first);
+                    if (fresh[kv.second]) patches[kv.second].active=2.f;
+                }
+                if (!st.lodBuffer[0].handle) for (auto& b:st.lodBuffer) b=createBuffer(
+                    ctx->allocator(),ctx->device(),slots*sizeof(Patch),
+                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                    VMA_MEMORY_USAGE_AUTO,VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
+                const auto& b=st.lodBuffer[currentFrame];
+                void* ptr=nullptr;
+                check(vmaMapMemory(ctx->allocator(),b.alloc,&ptr),"vmaMapMemory(cdlod)");
+                std::memcpy(ptr,patches.data(),slots*sizeof(Patch));
+                flushHostWrites(ctx->allocator(),b.alloc); vmaUnmapMemory(ctx->allocator(),b.alloc);
+                // Two otherwise unused skirt words carry previous-vertex address
+                // in the opt-in shader; original push values are untouched OFF.
+                std::memcpy(&pc.skirtRings,&st.blas->prevVertex.address,sizeof(VkDeviceAddress));
+                pc.lodPatches=b.address; pc.warpCenterX=dm.lodEyeX; pc.warpCenterZ=dm.lodEyeZ;
+                if (fine().on) { const float reach=fineReach(); std::memcpy(&pc.skirtPad,&reach,sizeof(float)); }// KRV_CDLOD_FINE
+                st.lodEyeX=dm.lodEyeX; st.lodEyeZ=dm.lodEyeZ; st.lodEyeHeight=dm.lodEyeHeight; pc.warpHalfRange=dm.lodEyeHeight;
+                oceanSkirt[0]=dm.lodEyeX; oceanSkirt[1]=dm.lodEyeZ;
+                oceanSkirt[2]=8000.f; oceanSkirt[3]=12000.f; oceanSkirt[4]=dm.skirt.mss;
+            }
             if (timed) gpuTimings_->begin(cb, vulkan::TP_OceanDisplace, currentFrame);
             waterDisplace_->recordDispatch(cb, st.displaceDS, pc);
             if (timed) gpuTimings_->end(cb, vulkan::TP_OceanDisplace, currentFrame);
@@ -3131,11 +3283,13 @@ void VulkanRenderer::Impl::recordDisplacedUpdate(VkCommandBuffer cb, DisplacedMe
                 // frame.
                 const double nowSec = frameNowSec();
                 float foamDecay = 0.992f;// first frame: no dt reference yet
+                float foamDt    = 0.0f;
                 if (st.foamPrevTimeSec >= 0.0) {
                     const float dt = std::clamp(
                             static_cast<float>(nowSec - st.foamPrevTimeSec),
                             0.0f, 0.25f);
-                    foamDecay = std::exp(-dt / 2.0f);
+                    foamDecay = std::exp(-dt / 2.5f);
+                    foamDt    = dt;
                 }
                 st.foamPrevTimeSec = nowSec;
 
@@ -3154,9 +3308,80 @@ void VulkanRenderer::Impl::recordDisplacedUpdate(VkCommandBuffer cb, DisplacedMe
                 fpc.wakeTrailAddr  = wakeTrailAddr;
                 fpc.hullAddr       = hullAddr;
                 fpc.hullCount      = hullCount;
-                fpc.natFoamScale   = std::clamp(dm.params.foamAmount, 0.0f, 1.0f);
+                fpc.natFoamScale   = std::clamp(dm.params.foamAmount, 0.0f, 1.5f);
+                fpc.coarseFold     = dm.params.foamCoarseFold;
+                fpc.simDt          = foamDt;
+                fpc.currentTime = static_cast<float>(nowSec);
+                fpc.gateT          = -1.0f;
+                fpc.fineFold       = dm.params.foamFineFold;
+                if (dm.params.foamGateLife > 0.0f) {
+                    fpc.gateOffX = static_cast<float>(std::fmod(nowSec * dm.params.foamGateVx, 10000.0));
+                    fpc.gateOffZ = static_cast<float>(std::fmod(nowSec * dm.params.foamGateVz, 10000.0));
+                    fpc.gateT    = static_cast<float>(std::fmod(nowSec / dm.params.foamGateLife, 1000.0));
+                }
+                fpc.driftX     = dm.params.foamDriftX;   //
+                fpc.driftZ     = dm.params.foamDriftZ;
+                fpc.rowSpacing = dm.params.foamRowSpacing;
+                // foam carried by the water: breaking events still on the water instead of riding the crest.
+                static const bool foamResidue = [] { const char* v = std::getenv("KRV_FOAM_RESIDUE"); return v && *v == '1'; }();
+                static const bool foamCarry = foamResidue || [] { const char* v = std::getenv("KRV_FOAM_CARRY"); return v && *v == '1'; }();
+                fpc.bandPacked = dm.params.foamBandPacked;
+                // (+ 2000 marks KRV_FOAM_RESIDUE's stage B lifetimes)
+                fpc.carryT = foamCarry ? static_cast<float>(1.0 + std::fmod(nowSec / vulkan::FoamWorldPipeline::kFoamCarryLife, 1000.0) + (foamResidue ? 2000.0 : 0.0)) : 0.0f;
+                if (std::getenv("KRV_FOAM_DIAGNOSTICS") && foamDt > 0.f) {
+                    if (!st.foamAuditBuffer.handle)
+                        st.foamAuditBuffer = createBuffer(ctx->allocator(), ctx->device(), VkDeviceSize(st.foamRes) * st.foamRes * 16,
+                            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                            VMA_MEMORY_USAGE_AUTO_PREFER_HOST, VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT);
+                    fpc.auditAddr = st.foamAuditBuffer.address;
+                    st.foamAuditTime = static_cast<float>(nowSec);
+                    st.foamAuditDt = foamDt;
+                }
+                fpc.cascadeMask |= uint32_t(std::round(std::clamp(dm.params.foamStormStreaks, 0.f, 1.f) * 65535.f)) << 8u;
+                // breakers in place (KRV_BREAKERS_INPLACE=1 with the storm look)
+                if (const char *bi = std::getenv("KRV_BREAKERS_INPLACE"); bi && *bi == '1')
+                    if (const char *sl = std::getenv("KRV_STORM_LOOK"); sl && *sl == '1') fpc.cascadeMask |= 1u << 24u;   // the storm streak channel's wind factor (0 = off)
+                // where KRV_SLOPE_BUDGET=1 acts (KRV_SB_REBASE=1, set by the application) the band's fold and the breakers'
+                // trigger read the waves that break (bit 25), the trigger's thresholds scaled by n/32 (bits 26..31);
+                // KRV_BRK_STEEP_N overrides n for calibration
+                if (const char *sb = std::getenv("KRV_SB_REBASE"); sb && *sb == '1') {
+                    static const unsigned nB = [] { const char *v = std::getenv("KRV_BRK_STEEP_N"); return v ? std::min(63u, unsigned(std::atoi(v))) : 32u; }();
+                    fpc.cascadeMask |= (1u << 25u) | (nB << 26u);
+                }
+                // KRV_WATER_BUBBLES=1 keeps the bubble plumes' history in the field's alpha (bit 3), injected by the
+                // in-place breakers and the wash; =2 also by the band's deposits (bit 4). KRV_WATER_BUBBLES_TAU picks the
+                // plume's e-folding for calibration (bits 5..6: 10 s, or 6 / 15 / 20)
+                if (const char *wb = std::getenv("KRV_WATER_BUBBLES"); wb && (*wb == '1' || *wb == '2')) {
+                    static const unsigned tauSel = [] {
+                        const char *v = std::getenv("KRV_WATER_BUBBLES_TAU"); const int s = v ? std::atoi(v) : 10;
+                        return s == 6 ? 1u : s == 15 ? 2u : s == 20 ? 3u : 0u; }();
+                    fpc.cascadeMask |= 8u | (*wb == '2' ? 16u : 0u) | (tauSel << 5u);
+                }
                 if (timed) gpuTimings_->begin(cb, vulkan::TP_OceanFoam, currentFrame);
+                {   // the previous frame's foam into its copy, which the advection reads
+                    VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+                    mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
+                    mb.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+                    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | ctx->rtShaderStage(), VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                         0, 1, &mb, 0, nullptr, 0, nullptr);
+                    VkImageCopy ic{};
+                    ic.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+                    ic.dstSubresource = ic.srcSubresource;
+                    ic.extent = {st.foamRes, st.foamRes, 1};
+                    vkCmdCopyImage(cb, st.foamImage.image, VK_IMAGE_LAYOUT_GENERAL, st.foamPrevImage.image, VK_IMAGE_LAYOUT_GENERAL, 1, &ic);
+                    mb.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+                    mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+                    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                         0, 1, &mb, 0, nullptr, 0, nullptr);
+                }
                 foamWorld_->recordDispatch(cb, st.foamWorldDS, fpc);
+                if (fpc.auditAddr) {
+                    VkMemoryBarrier auditBarrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+                    auditBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+                    auditBarrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+                    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
+                                         0, 1, &auditBarrier, 0, nullptr, 0, nullptr);
+                }
                 if (timed) gpuTimings_->end(cb, vulkan::TP_OceanFoam, currentFrame);
                 // The deferred shade samples the foam image (binding 44) later
                 // this frame; the frame graph orders that read (the water pass
@@ -3172,7 +3397,7 @@ void VulkanRenderer::Impl::recordDisplacedBlasRebuild(VkCommandBuffer cb, Displa
             // Buffer barrier: compute write → AS-build read on the vertex/normal buffers.
             // (Under the async-compute pilot the write was on the graphics queue
             // and S1 is what orders it; the barrier then orders nothing.)
-            VkBufferMemoryBarrier bbs[2]{};
+            VkBufferMemoryBarrier bbs[3]{};
             bbs[0].sType         = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
             bbs[0].srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
             // The build READS these buffers as its vertex input: the spec files
@@ -3187,10 +3412,12 @@ void VulkanRenderer::Impl::recordDisplacedBlasRebuild(VkCommandBuffer cb, Displa
             bbs[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
             bbs[1] = bbs[0];
             bbs[1].buffer = st.blas->normal.handle;
+            bbs[2] = bbs[0]; bbs[2].buffer = st.blas->prevVertex.handle;
+            bbs[2].dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT;
             vkCmdPipelineBarrier(cb,
                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-                0, 0, nullptr, 2, bbs, 0, nullptr);
+                VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR | (dm.cdlod ? VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_VERTEX_INPUT_BIT : 0u),
+                0, 0, nullptr, dm.cdlod ? 3u : 2u, bbs, 0, nullptr);
 
             // (5) Rebuild the BLAS in-place (same buffers, same AS handle).
             // Mirrors refreshSkinnedBlas — extracted into a helper would be
@@ -3318,6 +3545,7 @@ void VulkanRenderer::Impl::mirrorDisplacedHeightfields(DisplacedMesh& dm, Displa
                     vmaUnmapMemory(ctx->allocator(), buf.alloc);
                     cf.dim      = dim;
                     cf.tileSize = tileSizes[ci];
+                    if(dm.cdlod){cf.lodHeight.clear();cf.lodDisp.clear();}
                 }
             }
         }
@@ -4144,6 +4372,15 @@ VulkanRenderer::Impl::DisplacedMeshState* VulkanRenderer::Impl::ensureDisplacedS
             // used to be a zero-filled per-vertex foam buffer, read solely for
             // its non-null address — the contents were dead).
             blas->isOceanSurface = true;
+            if (dm.cdlod) {
+                // The CDLOD dispatch resets history for reassigned slots.
+                const auto bytes=blas->prevVertex.size;
+                destroyBuffer(ctx->allocator(),blas->prevVertex);
+                blas->prevVertex=createBuffer(ctx->allocator(),ctx->device(),bytes,
+                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_VERTEX_BUFFER_BIT|
+                    VK_BUFFER_USAGE_TRANSFER_DST_BIT|VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                    VMA_MEMORY_USAGE_AUTO);
+            }
 
             // Per-vertex previous-pose buffer for hybrid raster motion vec —
             // buildBlasFor already allocated + seeded blas->prevVertex (same
@@ -4250,6 +4487,7 @@ VulkanRenderer::Impl::DisplacedMeshState* VulkanRenderer::Impl::ensureDisplacedS
                 c.dyn      = std::make_unique<water::DynamicSpectrum>(
                         *ctx, *c.phillips, texSize, tileSizes[i]);
                 c.ifft     = std::make_unique<water::IFFT>(*ctx, texSize);
+                if(dm.cdlod && i<2) c.filter=std::make_unique<vulkan::CdlodFilter>(*ctx,c.dyn->ht(),c.dyn->displacement());
                 state->cascadeMask |= (1u << i);
             }
             if (state->cascadeMask == 0u) return nullptr; // no cascades → invalid setup
@@ -4370,7 +4608,7 @@ VulkanRenderer::Impl::DisplacedMeshState* VulkanRenderer::Impl::ensureDisplacedS
                 VkImageCreateInfo ici{};
                 ici.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
                 ici.imageType     = VK_IMAGE_TYPE_2D;
-                ici.format        = VK_FORMAT_R32_SFLOAT;
+                ici.format        = VK_FORMAT_R32G32B32A32_SFLOAT;   // r the foam, g its freshness; b the storm streaks
                 ici.extent        = {state->foamRes, state->foamRes, 1};
                 ici.mipLevels     = 1;
                 ici.arrayLayers   = 1;
@@ -4378,7 +4616,8 @@ VulkanRenderer::Impl::DisplacedMeshState* VulkanRenderer::Impl::ensureDisplacedS
                 ici.tiling        = VK_IMAGE_TILING_OPTIMAL;
                 ici.usage         = VK_IMAGE_USAGE_STORAGE_BIT |
                                     VK_IMAGE_USAGE_SAMPLED_BIT |
-                                    VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+                                    VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                                    VK_IMAGE_USAGE_TRANSFER_SRC_BIT;// readOceanFoam
                 ici.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
                 ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
                 VmaAllocationCreateInfo aci{};
@@ -4386,19 +4625,30 @@ VulkanRenderer::Impl::DisplacedMeshState* VulkanRenderer::Impl::ensureDisplacedS
                 check(vmaCreateImage(ctx->allocator(), &ici, &aci,
                                      &state->foamImage.image, &state->foamImage.alloc, nullptr),
                       "vmaCreateImage(foamWorld)");
-                state->foamImage.format = VK_FORMAT_R32_SFLOAT;
+                state->foamImage.format = VK_FORMAT_R32G32B32A32_SFLOAT;
                 state->foamImage.width  = state->foamRes;
                 state->foamImage.height = state->foamRes;
                 VkImageViewCreateInfo vci{};
                 vci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
                 vci.image = state->foamImage.image;
                 vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
-                vci.format = VK_FORMAT_R32_SFLOAT;
+                vci.format = VK_FORMAT_R32G32B32A32_SFLOAT;
                 vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
                 check(vulkan::createImageView(ctx->device(), &vci, nullptr, &state->foamImage.view),
                       "vulkan::createImageView(foamWorld)");
                 ctx->setObjectName(state->foamImage.image, "ocean.foamWorld (R32F)");
                 ctx->setObjectName(state->foamImage.view,  "ocean.foamWorld (R32F)");
+                // its previous-frame copy, the advection's source (same shape; cleared and in GENERAL below)
+                check(vmaCreateImage(ctx->allocator(), &ici, &aci,
+                                     &state->foamPrevImage.image, &state->foamPrevImage.alloc, nullptr),
+                      "vmaCreateImage(foamWorldPrev)");
+                state->foamPrevImage.format = VK_FORMAT_R32G32B32A32_SFLOAT;
+                state->foamPrevImage.width  = state->foamRes;
+                state->foamPrevImage.height = state->foamRes;
+                vci.image = state->foamPrevImage.image;
+                check(vulkan::createImageView(ctx->device(), &vci, nullptr, &state->foamPrevImage.view),
+                      "vulkan::createImageView(foamWorldPrev)");
+                ctx->setObjectName(state->foamPrevImage.image, "ocean.foamWorldPrev (R32F)");
 
                 // Initial clear to zero + layout transition to GENERAL so the
                 // first foam_world dispatch's imageLoad reads 0 (no foam yet)
@@ -4445,6 +4695,27 @@ VulkanRenderer::Impl::DisplacedMeshState* VulkanRenderer::Impl::ensureDisplacedS
                 }
                 endAndSubmitOneShot(cb);
                 state->foamImage.currentLayout = VK_IMAGE_LAYOUT_GENERAL;
+                {   // the copy the same way: cleared, in GENERAL
+                    VkCommandBuffer cb2 = beginOneShot();
+                    VkImageMemoryBarrier imb{};
+                    imb.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                    imb.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+                    imb.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+                    imb.srcAccessMask = 0;
+                    imb.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                    imb.image = state->foamPrevImage.image;
+                    imb.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+                    imb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                    imb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                    vkCmdPipelineBarrier(cb2, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &imb);
+                    vkCmdClearColorImage(cb2, state->foamPrevImage.image, VK_IMAGE_LAYOUT_GENERAL, &cc, 1, &sub);
+                    imb.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+                    imb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                    imb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+                    vkCmdPipelineBarrier(cb2, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &imb);
+                    endAndSubmitOneShot(cb2);
+                    state->foamPrevImage.currentLayout = VK_IMAGE_LAYOUT_GENERAL;
+                }
             }
 
             // Allocate this mesh's displace descriptor set + write bindings.
@@ -4462,7 +4733,7 @@ VulkanRenderer::Impl::DisplacedMeshState* VulkanRenderer::Impl::ensureDisplacedS
                 imageInfos[i * 2 + 0].imageView   = c.dyn->ht().view;
                 imageInfos[i * 2 + 0].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
                 imageInfos[i * 2 + 1].sampler     = waterDisplace_->sampler();
-                imageInfos[i * 2 + 1].imageView   = c.dyn->displacement().view;
+                imageInfos[i * 2 + 1].imageView   = c.filter ? c.filter->view() : c.dyn->displacement().view;
                 imageInfos[i * 2 + 1].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
             }
             std::array<VkWriteDescriptorSet, 6> ws{};
@@ -4494,7 +4765,7 @@ VulkanRenderer::Impl::DisplacedMeshState* VulkanRenderer::Impl::ensureDisplacedS
             foamStorageInfo.sampler     = VK_NULL_HANDLE;
             foamStorageInfo.imageView   = state->foamImage.view;
             foamStorageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-            std::array<VkWriteDescriptorSet, 7> fws{};
+            std::array<VkWriteDescriptorSet, 8> fws{};
             for (uint32_t i = 0; i < 6; ++i) {
                 fws[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
                 fws[i].dstSet = state->foamWorldDS;
@@ -4509,7 +4780,19 @@ VulkanRenderer::Impl::DisplacedMeshState* VulkanRenderer::Impl::ensureDisplacedS
             fws[6].descriptorCount= 1;
             fws[6].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
             fws[6].pImageInfo     = &foamStorageInfo;
-            vulkan::updateDescriptorSets(ctx->device(), uint32_t(fws.size()), fws.data(), 0, nullptr);
+            VkDescriptorImageInfo foamPrevInfo = foamStorageInfo;   // binding 7, the previous frame's foam
+            foamPrevInfo.imageView = state->foamPrevImage.view;
+            fws[7] = fws[6];
+            fws[7].dstBinding = 7;
+            fws[7].pImageInfo = &foamPrevInfo;
+            VkDescriptorImageInfo foamDrawn0Info = foamCascadeInfos[1];   // binding 8, the swell as drawn
+            if (state->cascades[0].filter && (state->cascadeMask & 1u)) foamDrawn0Info.imageView = state->cascades[0].filter->view();
+            std::array<VkWriteDescriptorSet, 9> fws9{};
+            std::copy(fws.begin(), fws.end(), fws9.begin());
+            fws9[8] = fws[1];
+            fws9[8].dstBinding = 8;
+            fws9[8].pImageInfo = &foamDrawn0Info;
+            vulkan::updateDescriptorSets(ctx->device(), uint32_t(fws9.size()), fws9.data(), 0, nullptr);
 
             // Hand the smallest enabled cascade's height image to closest_hit
             // (binding 32) for sub-mesh-resolution normal perturbation. Picks
@@ -4526,8 +4809,14 @@ VulkanRenderer::Impl::DisplacedMeshState* VulkanRenderer::Impl::ensureDisplacedS
                         fineTile = state->cascades[i].tileSize;
                     }
                 }
+                for (uint32_t i = 0; i < 3; ++i) {
+                    inspectHeight_[i] = (state->cascadeMask & (1u << i)) ? state->cascades[i].dyn->ht().view : oceanFineHeightDummy.view;
+                    inspectDisplace_[i] = (state->cascadeMask & (1u << i)) ? state->cascades[i].dyn->displacement().view : oceanFineHeightDummy.view;
+                }
                 if (fineTile > 0.f) {
                     oceanFineHeightView = state->cascades[fineIdx].dyn->ht().view;
+                    oceanDisplace2View  = state->cascades[fineIdx].dyn->displacement().view;
+                    oceanDisplace0View  = state->cascades[0].filter ? state->cascades[0].filter->view() : ((state->cascadeMask & 1u) ? state->cascades[0].dyn->displacement().view : oceanFineHeightDummy.view);
                     oceanFineTileSize   = fineTile;
                     rewriteDeferredDescriptors();
                 }

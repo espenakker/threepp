@@ -5,12 +5,13 @@
 
 #include "threepp/renderers/vulkan/shaders/water_displace.comp.spv.h"
 
+#include "threepp/renderers/vulkan/shaders/water_displace_cdlod.comp.spv.h"
 #include <array>
 
 namespace threepp::vulkan {
 
-    static_assert(sizeof(WaterDisplacePipeline::PushConstants) == 96,
-                  "WaterDisplacePipeline::PushConstants must match water_displace.comp's Pc layout (96 bytes)");
+    static_assert(sizeof(WaterDisplacePipeline::PushConstants) == 128,
+                  "WaterDisplacePipeline::PushConstants must extend the default 120-byte Pc by one 8-byte CDLOD address");
 
     WaterDisplacePipeline::WaterDisplacePipeline(VulkanContext& ctx)
         : ctx_(ctx) {
@@ -19,6 +20,7 @@ namespace threepp::vulkan {
 
     WaterDisplacePipeline::~WaterDisplacePipeline() {
         VkDevice d = ctx_.device();
+        if (lodPipeline_) vkDestroyPipeline(d, lodPipeline_, nullptr);
         if (pipeline_)       vkDestroyPipeline(d, pipeline_, nullptr);
         if (pipelineLayout_) vkDestroyPipelineLayout(d, pipelineLayout_, nullptr);
         if (dsLayout_)       vkDestroyDescriptorSetLayout(d, dsLayout_, nullptr);
@@ -80,6 +82,7 @@ namespace threepp::vulkan {
               "vkCreateComputePipelines(displace)");
         vkDestroyShaderModule(ctx_.device(), mod, nullptr);
 
+
         // Pool sized for up to kMaxOceans DisplacedMesh instances at once.
         // No FREE_DESCRIPTOR_SET_BIT: sets are released when the pool is
         // destroyed; bump kMaxOceans if scenes ever exceed it.
@@ -122,7 +125,24 @@ namespace threepp::vulkan {
     void WaterDisplacePipeline::recordDispatch(VkCommandBuffer cb,
                                                VkDescriptorSet ds,
                                                const PushConstants& pc) {
-        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_);
+        if (pc.lodPatches && !lodPipeline_) {
+            VkShaderModuleCreateInfo smci{};
+            smci.sType=VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+            VkShaderModule mod=VK_NULL_HANDLE;
+            VkComputePipelineCreateInfo cpci{};
+            cpci.sType=VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+            cpci.layout=pipelineLayout_;
+            cpci.stage.sType=VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+            cpci.stage.stage=VK_SHADER_STAGE_COMPUTE_BIT;
+            cpci.stage.pName="main";
+        smci.codeSize = sizeof(kWaterDisplaceCdlodCompSpv);
+        smci.pCode = kWaterDisplaceCdlodCompSpv;
+        check(vkCreateShaderModule(ctx_.device(), &smci, nullptr, &mod), "vkCreateShaderModule(cdlod)");
+        cpci.stage.module = mod;
+        check(vkCreateComputePipelines(ctx_.device(), ctx_.pipelineCache(),1,&cpci,nullptr,&lodPipeline_), "vkCreateComputePipelines(cdlod)");
+        vkDestroyShaderModule(ctx_.device(), mod, nullptr);
+        }
+        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pc.lodPatches ? lodPipeline_ : pipeline_);
         vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE,
                                 pipelineLayout_, 0, 1, &ds, 0, nullptr);
         vkCmdPushConstants(cb, pipelineLayout_, VK_SHADER_STAGE_COMPUTE_BIT,

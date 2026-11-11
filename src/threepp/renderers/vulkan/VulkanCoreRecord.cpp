@@ -1103,6 +1103,7 @@ void VulkanRenderer::Impl::addSwapchainPasses(rg::RenderGraph& g, uint32_t image
 }
 
 void VulkanRenderer::Impl::addSplatPasses(rg::RenderGraph& g) {
+            if (inspectField()) return;
             // ── Gaussian splats into the linear-HDR scene ──────────────────────
             // After the shade (so the G-buffer depth it tests against, and the
             // sceneHdr it composites over, are both final) and before the DoF
@@ -1487,7 +1488,7 @@ void VulkanRenderer::Impl::addUpscaleAndPostPasses(rg::RenderGraph& g, uint32_t 
             // confusion — every point projects sharp by construction. The CoC
             // derivation below would read a tan(fov/2) the projection never
             // carried and defocus the frame by an arbitrary amount.
-            if (!secondary && dofEnabled_ && !view().orthoFrame_ && dof_ && dof_->valid()) {
+            if (!inspectField() && !secondary && dofEnabled_ && !view().orthoFrame_ && dof_ && dof_->valid()) {
                 const float     kSensorH  = filmHeightM_;// sensor height (m)
                 constexpr float kMaxCocPx = 32.f;        // full-res radius clamp
                 const float fl = (kSensorH * 0.5f) / std::max(tanHalfFovY_, 1e-3f);
@@ -1504,6 +1505,7 @@ void VulkanRenderer::Impl::addUpscaleAndPostPasses(rg::RenderGraph& g, uint32_t 
             }
 
             const auto addBloom = [&] {
+                if (inspectField()) return;
                 if (bloomIntensity_ <= 0.0f) return;
                 auto pass = g.addPass("bloom", [this, f](VkCommandBuffer c) {
                     view().bloom_->recordPyramid(c, f, regionRenderExt_.width, regionRenderExt_.height,
@@ -1518,6 +1520,7 @@ void VulkanRenderer::Impl::addUpscaleAndPostPasses(rg::RenderGraph& g, uint32_t 
             const auto addHdrPostAndFinalize = [&](rg::ImageHandle history) {
                 const auto hdrOut = g.importImage("post.hdrOut", view().post_->hdrOutImage(f), kColor, 1, kGeneral);
                 auto post = g.addPass("post", [this, f, exposureBits, effBloomIntensity](VkCommandBuffer c) {
+                    view().post_->oceanInspect = inspectField();
                     view().post_->recordDispatch(c, f, regionSwapExt_.width, regionSwapExt_.height,
                                                  static_cast<uint32_t>(toneMapping_),
                                                  exposureBits, preExpBits_, envIsBgColor,
@@ -1744,6 +1747,7 @@ void VulkanRenderer::Impl::addUpscaleAndPostPasses(rg::RenderGraph& g, uint32_t 
                 addBloom();
                 const auto taaInput = g.importImage("taa.input", view().taa_->inputImage(f), kColor, 1, kGeneral);
                 auto post = g.addPass("post", [this, f, exposureBits, effBloomIntensity](VkCommandBuffer c) {
+                    view().post_->oceanInspect = inspectField();
                     view().post_->recordDispatch(c, f, regionRenderExt_.width, regionRenderExt_.height,
                                                  static_cast<uint32_t>(toneMapping_),
                                                  exposureBits, preExpBits_, envIsBgColor,
@@ -1765,8 +1769,8 @@ void VulkanRenderer::Impl::addUpscaleAndPostPasses(rg::RenderGraph& g, uint32_t 
                 const float alpha = viewTaaOff() ? 1.0f : effAlpha;
                 // Sharpening and motion blur are display-stage choices of the
                 // primary; a secondary view is a plain temporal resolve.
-                const bool  sharpen = !secondary && sharpenStrength_ > 0.0f;
-                const float mblur   = secondary ? 0.f : motionBlurAmount_;
+                const bool  sharpen = !inspectField() && !secondary && sharpenStrength_ > 0.0f;
+                const float mblur   = secondary || inspectField() ? 0.f : motionBlurAmount_;
                 auto taa = g.addPass("taa", [this, f, imageIndex, alpha, taaDtFrames, ext, ptExt, sharpen, mblur](VkCommandBuffer c) {
                     gpuTimings_->begin(c, TP_TAA, f);
                     view().taa_->recordResolve(c, f, imageIndex,
@@ -3165,6 +3169,7 @@ const Image2D& VulkanRenderer::Impl::overlayDepthImage() {
 }
 
 void VulkanRenderer::Impl::addTailPasses(rg::RenderGraph& g, uint32_t imageIndex) {
+            if (inspectField()) return; // palette is the complete image, including non-water
             const uint32_t f = currentFrame;
             constexpr auto kColor   = VK_IMAGE_ASPECT_COLOR_BIT;
             constexpr auto kDepth   = VK_IMAGE_ASPECT_DEPTH_BIT;

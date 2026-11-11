@@ -173,6 +173,11 @@ vec3 agx(vec3 color) {
     color = LINEAR_REC2020_TO_LINEAR_SRGB * color;
     return clamp(color, 0.0, 1.0);
 }
+vec3 agxAces(vec3 c) {// as post_composite.comp's
+    const float mx = max(max(c.r, c.g), max(c.b, 1e-10));
+    const float w = max(smoothstep(-1.0, 1.0, log2(mx / 0.18)), smoothstep(0.6, 0.9, (mx - min(min(c.r, c.g), c.b)) / mx));
+    return mix(agx(c), acesFilmic(c / 0.6), w);
+}
 vec3 toneMap(vec3 c, uint mode, float exposure) {
     if (mode == 1u) return c * exposure;                    // Linear
     if (mode == 2u) return reinhard(c * exposure);          // Reinhard
@@ -180,6 +185,7 @@ vec3 toneMap(vec3 c, uint mode, float exposure) {
     if (mode == 4u) return acesFilmic(c * (exposure / 0.6));// ACESFilmic
     if (mode == 6u) return neutral(c * exposure);           // Khronos PBR Neutral
     if (mode == 7u) return agx(c * exposure);               // AgX
+    if (mode == 8u) return agxAces(c * exposure);           // AgX toe, ACES shoulder
     return c;// None / Custom — pass-through
 }
 

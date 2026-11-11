@@ -25,7 +25,7 @@ namespace threepp::vulkan {
     // One vessel as water_displace.comp and foam_world.comp read it: the
     // DisplacedMesh::HullExclusion pose, the wake's forward speed and the
     // vessel's slice of the wake-trail buffer. Mirrors `OceanHull` in
-    // ocean_cascade.glsl field for field (scalar layout, 48 bytes).
+    // ocean_cascade.glsl field for field (scalar layout, 116 bytes).
     struct OceanHullGpu {
         float    centerX;
         float    centerZ;
@@ -39,8 +39,25 @@ namespace threepp::vulkan {
         float    roll;
         uint32_t trailFirst;  // first WakeSample of this vessel in the trail buffer
         uint32_t trailCount;
+        float    radEnabled;
+        float    radOmega;
+        float    radK;
+        float    radAbar;
+        float    radDraught;
+        float    radPhase;
+        float    radHeaveRe;
+        float    radHeaveIm;
+        float    radRollRe;
+        float    radRollIm;
+        float    radPitchRe;
+        float    radPitchIm;
+        float    refR;
+        float    refK;
+        float    refDirX;
+        float    refDirZ;
+        float    radBand;
     };
-    static_assert(sizeof(OceanHullGpu) == 48, "OceanHullGpu must match ocean_cascade.glsl's OceanHull");
+    static_assert(sizeof(OceanHullGpu) == 116, "OceanHullGpu must match ocean_cascade.glsl's OceanHull");
 
     class WaterDisplacePipeline {
 
@@ -49,7 +66,7 @@ namespace threepp::vulkan {
         // combined-image-samplers (3 cascades × 2 images).
         static constexpr uint32_t kMaxOceans = 16;
 
-        // Must match water_displace.comp's `Pc` struct (96 bytes):
+        // Must match water_displace.comp's `Pc` struct (120 bytes):
         // 4 × VkDeviceAddress (32) + 16 × u32/float (64). The vessels live in
         // a per-frame buffer (hullAddr → OceanHullGpu[hullCount]); one hull
         // alone used to fill this block to the 128-byte maximum.
@@ -74,6 +91,13 @@ namespace threepp::vulkan {
             float           warpHalfRange; // gates the whole feature on
             float           warpCoefA;     // warpHalfRange > 0.
             uint32_t        hullCount;     // active vessels (0 = none)
+            uint32_t        skirtRings;    // DisplacedMesh::Skirt (0 = none)
+            float           skirtGrowth;   // each ring this much wider than the last
+            float           skirtFade0;    // the skirt's displacement fades out
+            float           skirtFade1;    // between these spacings (m)
+            float           skirtInvTwoR;  // 1 / (2 R_earth); 0 = flat
+            uint32_t        skirtPad;
+            VkDeviceAddress lodPatches;
         };
 
         explicit WaterDisplacePipeline(VulkanContext& ctx);
@@ -101,6 +125,7 @@ namespace threepp::vulkan {
 
     private:
         VulkanContext&        ctx_;
+        VkPipeline lodPipeline_ = VK_NULL_HANDLE;
         VkDescriptorSetLayout dsLayout_       = VK_NULL_HANDLE;
         VkPipelineLayout      pipelineLayout_ = VK_NULL_HANDLE;
         VkPipeline            pipeline_       = VK_NULL_HANDLE;

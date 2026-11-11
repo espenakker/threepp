@@ -475,6 +475,19 @@ namespace threepp::vulkan {
         tb.rippleViscosity = std::max(wf.rippleViscosity, 0.0f);
         tb.rippleGain      = wf.rippleGain;
         tb.albedo          = std::max(wf.albedo, 0.0f);
+        tb.driftX          = wf.driftX;
+        tb.driftZ          = wf.driftZ;
+
+        // Carry the same moving footprints used by water displacement. These
+        // are read only by the natural live-cap gate, never by wake evolution.
+        // Values, rather than pointers into rotating frame buffers, keep held
+        // shot frames valid when the wake table does not advance in time.
+        for (uint32_t v = 0; v < DisplacedMesh::kMaxVessels; ++v) {
+            const auto& h = dm.vesselHull(v);
+            if (h.halfLength > 0.f && h.halfBeam > 0.f)
+                tb.foamHulls[tb.foamHullCount++] = {h.centerX, h.centerZ, h.halfLength,
+                                                   h.halfBeam, h.sinYaw, h.cosYaw};
+        }
 
         uint32_t liveMask = 0;
         for (uint32_t i = 0; i < st.layers; ++i) {

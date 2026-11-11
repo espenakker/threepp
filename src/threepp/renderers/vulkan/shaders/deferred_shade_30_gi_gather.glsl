@@ -60,6 +60,9 @@ vec3 gatherEnv(vec3 P, vec3 N, ivec2 px, uint frame, bool doShadows, bool stocha
         // the gather. Probes OFF keeps the cosmetic openness = 1 fill (there is
         // nothing to replace the ambient with — enclosures would just go black).
         if (probesEnabled()) openness = missN / float(N_GI);
+#ifdef THREEPP_LOCAL_GI_VARIANT
+        if (flagOn(16384u)) openness = missN / float(N_GI);
+#endif
         return acc / float(N_GI);
     }
 

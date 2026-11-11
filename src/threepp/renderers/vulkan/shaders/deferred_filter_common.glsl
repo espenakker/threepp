@@ -42,6 +42,8 @@ layout(set = 0, binding = 33, scalar) uniform FogUbo {
     float murkDensity;   // murk σ_t (1/m; 0 = off); the clearest channel of murkSigma
     vec3  murkColor;     // murk tint (unused here — the recombine carries extinction only)
     vec3  murkSigma;     // murk σ_t per channel (all three = murkDensity for the scalar murk)
+    float murkAmbientK;  // present in GpuFogUbo — declared to align hfFloor
+    float hfFloor;       // the air medium's uniform background haze under the layer
 } fog;
 
 layout(push_constant) uniform Pc {
@@ -92,8 +94,8 @@ vec3 camOriginAt(ivec2 q) {
 // mean, exactly what a recombine extinction wants). Zero when height fog is off.
 #include "height_fog.glsl"
 float heightFogOpticalDepth(vec3 a, vec3 b) {
-    return heightFogLegOpticalDepth(a, b, fog.hfDensity, fog.hfFalloff,
-                                    fog.hfBaseY, fog.waterSurfaceY);
+    return airLegOpticalDepth(a, b, fog.hfDensity, fog.hfFalloff,
+                              fog.hfBaseY, fog.waterSurfaceY, fog.hfFloor);
 }
 
 // Fog transmittance over the camera→surface leg — the GI/reflection recombine

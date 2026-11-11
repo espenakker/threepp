@@ -782,7 +782,7 @@ void VulkanRenderer::Impl::createRasterGbufImages(uint32_t w, uint32_t h) {
                 // Cloud shadow map — FIXED 512² R8 (independent of the render
                 // extent; recreated here on resize). Top-down cloud
                 // transmittance regenerated per frame by cloud_shadow.comp.
-                g.cloudShadow = createAttachmentImage2D(512, 512, VK_FORMAT_R8_UNORM,
+                g.cloudShadow = createAttachmentImage2D(512, 1024, VK_FORMAT_R8_UNORM,
                                                         VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
                                                         VK_IMAGE_ASPECT_COLOR_BIT, N("cloudShadow"));
                 // Gaussian-splat depth AOV. Splats are PRIMARY-view

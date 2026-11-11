@@ -93,4 +93,14 @@ float heightFogLegOpticalDepth(float yA, float yB, float len,
     return heightFogAirLegOpticalDepth(yA, yB, len, density, falloff, baseY);
 }
 
+// The air medium as TWO terms : the layer above (setHeightFog) plus a uniform background haze
+// under it, scene.fog's own sigma kept with setHeightFog's keepSceneFog (a marine mist over a hazy sky).
+// The haze takes the uniform profile scene.fog alone gets (scale height 1e6 m). floorSigma 0 adds an exact
+// 0.0, so a one-term medium is unchanged to the bit.
+float airLegOpticalDepth(vec3 a, vec3 b, float density, float falloff, float baseY,
+                         float waterSurfaceY, float floorSigma) {
+    return heightFogLegOpticalDepth(a, b, density, falloff, baseY, waterSurfaceY)
+         + heightFogLegOpticalDepth(a, b, floorSigma, 1.0e6, 0.0, waterSurfaceY);
+}
+
 #endif// THREEPP_HEIGHT_FOG_GLSL

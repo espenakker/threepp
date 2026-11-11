@@ -14,6 +14,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -263,11 +264,12 @@ namespace threepp::vulkan {
                 hiddenWindowFallback = true;
                 std::cerr << "[VulkanContext] VK_EXT_headless_surface not available; "
                              "headless canvas falls back to a hidden-window surface.\n";
-            } else {
+            } else if (const char* ns = std::getenv("THREEPP_VULKAN_NO_SURFACE"); !(ns && *ns && *ns != '0')) {
                 throw std::runtime_error(
                         "[VulkanContext] headless mode needs VK_EXT_headless_surface, "
                         "which this Vulkan driver does not expose, and no window system "
-                        "is available to create a window surface instead");
+                        "is available to create a window surface instead "
+                        "(THREEPP_VULKAN_NO_SURFACE=1 renders offscreen without one)");
             }
         }
 
@@ -582,7 +584,17 @@ namespace threepp::vulkan {
         // scene in ~1 s against it. The blob is the backstop for when the
         // driver cache has lost an entry, and it is worth keeping only for
         // the shaders this build still has.
-        constexpr size_t kPipelineCacheCapBytes = size_t{64} << 20;
+        // Capture suites can exercise more live variants than the historical
+        // 64 MiB cap. Keep the default unchanged; bound the opt-in disk budget.
+        const size_t kPipelineCacheCapBytes = [] {
+            if (const char* value = std::getenv("THREEPP_VK_PIPELINE_CACHE_MB")) {
+                char* end = nullptr;
+                const auto mb = std::strtoul(value, &end, 10);
+                if (end != value && *end == '\0' && mb >= 16 && mb <= 1024)
+                    return size_t(mb) << 20;
+            }
+            return size_t{64} << 20;
+        }();
         const bool compact = usable && initial.size() > kPipelineCacheCapBytes;
         if (compact) usable = false;
 
@@ -764,6 +776,12 @@ namespace threepp::vulkan {
     }
 
     void VulkanContext::createSurface() {
+        if (const char* ns = std::getenv("THREEPP_VULKAN_NO_SURFACE"); ns && *ns && *ns != '0') {
+            headlessSurface_ = true;
+            surface_ = VK_NULL_HANDLE;
+            std::cerr << "[VulkanContext] surface: none (THREEPP_VULKAN_NO_SURFACE)\n";
+            return;
+        }
         if (headlessSurface_) {
             // Loaded via vkGetInstanceProcAddr — extension entry points are
             // not exported by every loader.
@@ -938,7 +956,7 @@ namespace threepp::vulkan {
                 queueFamilies_.compute = i;
             }
             VkBool32 presentSupport = VK_FALSE;
-            vkGetPhysicalDeviceSurfaceSupportKHR(physicalDevice_, i, surface_, &presentSupport);
+            if (surface_ != VK_NULL_HANDLE) vkGetPhysicalDeviceSurfaceSupportKHR(physicalDevice_, i, surface_, &presentSupport);
             if (presentSupport && queueFamilies_.present == UINT32_MAX) {
                 queueFamilies_.present = i;
             }
@@ -1404,12 +1422,15 @@ namespace threepp::vulkan {
 
     void VulkanContext::createSwapchain() {
         VkSurfaceCapabilitiesKHR caps{};
-        vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physicalDevice_, surface_, &caps);
-
         uint32_t fmtN = 0;
-        vkGetPhysicalDeviceSurfaceFormatsKHR(physicalDevice_, surface_, &fmtN, nullptr);
-        std::vector<VkSurfaceFormatKHR> formats(fmtN);
-        vkGetPhysicalDeviceSurfaceFormatsKHR(physicalDevice_, surface_, &fmtN, formats.data());
+        std::vector<VkSurfaceFormatKHR> formats;
+        // THREEPP_VULKAN_NO_SURFACE: no surface at all, straight to the offscreen images below
+        if (surface_ != VK_NULL_HANDLE) {
+            vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physicalDevice_, surface_, &caps);
+            vkGetPhysicalDeviceSurfaceFormatsKHR(physicalDevice_, surface_, &fmtN, nullptr);
+            formats.resize(fmtN);
+            vkGetPhysicalDeviceSurfaceFormatsKHR(physicalDevice_, surface_, &fmtN, formats.data());
+        }
 
         // No presentable surface: a headless surface that offers no formats
         // (NVIDIA's), or an explicit opt-in. Nothing is ever shown, so the
@@ -1420,6 +1441,12 @@ namespace threepp::vulkan {
             int w = 0, h = 0;
             glfwGetFramebufferSize(window_, &w, &h);
             if (w <= 0 || h <= 0) glfwGetWindowSize(window_, &w, &h);
+            // THREEPP_VULKAN_OFFSCREEN_SIZE=WxH: the requested size, where the platform clamped the
+            // hidden window (a service session's 1024x768 desktop turns 1280 wide into 1028)
+            if (const char* sz = std::getenv("THREEPP_VULKAN_OFFSCREEN_SIZE")) {
+                int sw = 0, sh = 0;
+                if (std::sscanf(sz, "%dx%d", &sw, &sh) == 2 && sw > 0 && sh > 0) w = sw, h = sh;
+            }
             const VkExtent2D ext{static_cast<uint32_t>(std::max(w, 1)), static_cast<uint32_t>(std::max(h, 1))};
             if (!offscreen_) {
                 std::cerr << "[VulkanContext] offscreen: no swapchain (" << fmtN

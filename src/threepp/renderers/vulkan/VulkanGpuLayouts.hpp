@@ -73,6 +73,7 @@ namespace threepp::vulkan::impl {
         // bgBlurriness * (mips - 1). envKnobFlags bit 0 = envRot is not the
         // identity, bit 1 = bgRot is not the identity: the shaders skip the
         // multiply otherwise, so a default scene samples exactly as before.
+        // Bit 2 requests the application's clear-day water chroma compensation.
         float    envRot[9];
         float    envIntensity;
         float    bgRot[9];
@@ -129,8 +130,9 @@ namespace threepp::vulkan::impl {
         // Appended, so a shader block that stops at murkColor still lines up.
         float murkSigma[3];  // murk σ_t per channel; all three = murkDensity for the scalar murk
         float murkAmbientK;  // setUnderwaterAmbientFalloff; 0 = the ambient terms ignore depth
+        float hfFloor;       // the air medium's uniform background haze under the layer (keepSceneFog); 0 = one term
     };
-    static_assert(sizeof(GpuFogUbo) == 92);
+    static_assert(sizeof(GpuFogUbo) == 96);
 
     // Volumetric cloud layer (VulkanRenderer::setClouds) + near-field
     // heterogeneous height fog (VulkanRenderer::setHeightFog). Both ride the
@@ -156,8 +158,9 @@ namespace threepp::vulkan::impl {
         float shadowActive; // 1.0 = cloud shadow map valid this frame (clouds on)
         float epoch;        // history generation — cloud_march rejects prev-epoch
                             // history (first-enable garbage, reconfigured decks)
+        float hfFloor;      // the air medium's uniform background haze under the layer (keepSceneFog); 0 = one term
     };
-    static_assert(sizeof(GpuCloudUbo) == 68);
+    static_assert(sizeof(GpuCloudUbo) == 72);
 
     struct DebugResolvePC {
         uint32_t view;      // 1 = normal, 2 = motion, 3 = ids, 4 = albedo

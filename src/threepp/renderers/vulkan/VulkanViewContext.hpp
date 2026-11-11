@@ -60,7 +60,7 @@ namespace threepp::vulkan::impl {
         Image2D       froxelLut;    // rgba16f 3D — front-to-back-integrated volumetric LUT; STORAGE (integrate) + SAMPLED (shade, trilinear)
         Image2D       cloudColor;   // rgba16f HALF-res — cloud march result (rgb=in-scatter, a=transmittance); STORAGE (march) + SAMPLED (shade upsample + prev-fif reproject), ping-ponged
         Image2D       cloudAux;     // rg16f HALF-res — cloud mean-depth (.r) + temporal histLen (.g); STORAGE (march) + SAMPLED (prev-fif history), ping-ponged
-        Image2D       cloudShadow;  // r8 512² (FIXED) — top-down cloud transmittance over an 8 km camera-centred square; STORAGE (shadow pass) + SAMPLED (surface/froxel/water sun); regenerated per frame
+        Image2D       cloudShadow;  // r8 512x1024 (FIXED) — top-down cloud sun transmittance over a 16 km camera-centred square, over the deck column map of 160 km (cloud_map.glsl); STORAGE (shadow pass) + SAMPLED (surface/froxel/water sun); regenerated per frame
         Image2D       rtao;         // rgba16f HALF-res — RT ambient occlusion (rgb=bentN*0.5+0.5, a=ao); STORAGE (rtao pass) + SAMPLED (shade upsample + prev-fif reproject), ping-ponged
         Image2D       rtaoAux;      // rgba16f HALF-res — RTAO temporal aux (.r=histLen, .g=E[ao^2], .b=near-field ao, .a=skyVis); STORAGE (rtao pass) + SAMPLED (prev-fif history), ping-ponged
         Image2D       splatDepth;   // r32f — Gaussian-splat expected view distance in world units, 0 where no cloud owns the pixel (SplatPass); FULL-RES only under setSplatDepthAov, 1x1 otherwise. STORAGE + TRANSFER (clear + AOV copy), GENERAL for its whole life

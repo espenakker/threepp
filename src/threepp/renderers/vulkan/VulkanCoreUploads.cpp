@@ -1099,7 +1099,7 @@ namespace threepp {
         // per-read from the upscale ratio (jitterPhaseCount_) and applied as
         // a modulo, so the sequence length tracks renderScale instead of a
         // fixed 16. uint32 wrap is harmless — the modulo re-bases each frame.
-        view().haltonFrame_ = view().haltonFrame_ + 1u;
+        if (!inspectFrozen_) view().haltonFrame_ = view().haltonFrame_ + 1u;
 
         // Refresh the per-frame descriptor set. Bindings 0-2 (UBO,
         // motionMat, matDescs) are tiny, and motionMat/matDescs handles can
@@ -1445,7 +1445,10 @@ namespace threepp {
         ubo.envIntensity = envKnobs_.envIntensity;
         ubo.bgIntensity  = envKnobs_.bgIntensity;
         ubo.bgBlurriness = envKnobs_.bgBlurriness;
-        ubo.envKnobFlags = (envKnobs_.envRotActive ? 1u : 0u) | (envKnobs_.bgRotActive ? 2u : 0u);
+        ubo.envKnobFlags = (envKnobs_.envRotActive ? 1u : 0u) | (envKnobs_.bgRotActive ? 2u : 0u) |
+                          (envKnobs_.waterClearDayGrade ? 4u : 0u) | (envKnobs_.waterDiffuseSky ? 8u : 0u) |
+                          (envKnobs_.waterBodyFix ? 16u : 0u) |
+                          (envKnobs_.waterDebug << 8u);
 
         // ── 4c: the billboard slice's copy of the sun ───────────────────────
         // ParticleFieldPass has no descriptor set by design, so a `lit`
@@ -1612,6 +1615,9 @@ namespace threepp {
         mediumBaseYThisFrame_   = heightFogEnabled_ ? heightFogBaseY_   : 0.0f;
         mediumFalloffThisFrame_ = heightFogEnabled_ ? heightFogFalloff_ : kUniformFogFalloff;
         mediumNoiseThisFrame_   = heightFogEnabled_ ? heightFogNoiseAmount_ : 0.0f;
+        // keepSceneFog: scene.fog's density stays on as a uniform haze UNDER the explicit layer (a marine
+        // mist over a hazy sky) instead of being overridden by it
+        mediumFloorThisFrame_   = (hfExplicitDensity && heightFogKeepSceneFog_ && fogPresent) ? sigma : 0.0f;
         // Air-fog tint (= scene.fog colour when present, else white — mirrors the
         // shade pass's medAlbedo). The overlay particle draw fades smoke toward
         // this; ubo.color already holds it for the fogPresent case.
@@ -1625,6 +1631,7 @@ namespace threepp {
         ubo.hfDensity = mediumActiveThisFrame_ ? mediumDensityThisFrame_ : 0.0f;
         ubo.hfBaseY   = mediumBaseYThisFrame_;
         ubo.hfFalloff = mediumFalloffThisFrame_;
+        ubo.hfFloor   = mediumActiveThisFrame_ ? mediumFloorThisFrame_ : 0.0f;
 
         // Underwater murk (setUnderwaterMurk) — a SEPARATE homogeneous medium
         // clipped to below waterSurfaceY, decoupled from the air fog above.
@@ -1711,6 +1718,7 @@ namespace threepp {
         ubo.hfBaseY       = mediumBaseYThisFrame_;
         ubo.hfFalloff     = mediumFalloffThisFrame_;
         ubo.hfNoiseAmount = mediumNoiseThisFrame_;
+        ubo.hfFloor       = mediumActiveThisFrame_ ? mediumFloorThisFrame_ : 0.0f;
         // Cloud shadow map is generated + sampled only when clouds are on (it's
         // the cloud's own transmittance projected to the ground).
         ubo.shadowActive  = cloudsEnabled_ ? 1.0f : 0.0f;

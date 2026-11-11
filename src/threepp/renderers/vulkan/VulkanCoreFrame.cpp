@@ -1442,7 +1442,7 @@ void VulkanRenderer::Impl::endFrame() {
             // causing the per-pixel FC=4096 running mean to slowly absorb the
             // single deterministic sample — image visibly resets from converged
             // toward biased noise. 16M ≈ 75 hours at 60 fps, no longer reachable.
-            if (sampleIndex < (1u << 24)) ++sampleIndex;
+            if (!inspectFrozen_ && sampleIndex < (1u << 24)) ++sampleIndex;
 
             // Advance serial + slot together, only on a SUBMITTED frame. A
             // failed acquire returns before endFrame(), so serial never runs

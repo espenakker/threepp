@@ -1,3 +1,4 @@
+#include "threepp/objects/OceanLod.hpp"
 #include "VulkanCoreImpl.hpp"
 
 #include "VulkanCpuPhaseProf.hpp"
@@ -457,6 +458,7 @@ void VulkanRenderer::Impl::cullEntriesAgainstFrustum(Camera& camera) {
         }
 
 void VulkanRenderer::Impl::ensureSceneBuilt(Object3D& scene, Camera& camera) {
+    const bool reflectionHitClasses = vulkan::SceneEnvKnobs::fromScene(scene).waterDebug == 17u;
             // force=false (matching GLRenderer): with
             // updateMatrix()'s change-detection early-out, only subtrees whose
             // transforms actually moved pay the world-matrix multiplies — a
@@ -1749,7 +1751,20 @@ void VulkanRenderer::Impl::ensureSceneBuilt(Object3D& scene, Camera& camera) {
                             // (a display frame at that instant too: the same surface)
                             {
                                 auto [it, fresh] = displacedLastT_.try_emplace(dm, now);
-                                if (!fresh && it->second == now) continue;
+                                bool moved = false;
+                                if (dm->cdlod) {
+                                    const auto& ce = camera.matrixWorld->elements;
+                                    dm->lodEyeX=ce[12]; dm->lodEyeZ=ce[14]; dm->lodEyeHeight=ce[13]-dm->matrixWorld->elements[13];
+                                    if (oceanlod::fine().on && camera.projectionMatrix.elements[15]==0.f) {// KRV_CDLOD_FINE: the lens and where it looks
+                                        auto& lf=oceanlod::fine();
+                                        lf.proj=camera.projectionMatrix.elements[5];
+                                        const float fl=std::hypot(ce[8],ce[10]);
+                                        if (fl>.2f) { lf.dirX=-ce[8]/fl; lf.dirZ=-ce[10]/fl; lf.halfAngle=1.25f*std::atan(1.f/std::max(camera.projectionMatrix.elements[0],1e-3f))+.0524f; }
+                                        else lf.halfAngle=4.f;
+                                    }
+                                    moved = stIt->second->lodEyeX!=ce[12] || stIt->second->lodEyeZ!=ce[14] || stIt->second->lodEyeHeight!=dm->lodEyeHeight;
+                                }
+                                if (!fresh && it->second == now && !moved) continue;
                                 it->second = now;
                             }
                             pendingDisplacedDeforms_.emplace_back(dm, stIt->second.get(), now);
@@ -2195,7 +2210,8 @@ void VulkanRenderer::Impl::ensureSceneBuilt(Object3D& scene, Camera& camera) {
                             if (patchMatDescs && !entryMatDirty[i]) continue;// unchanged → keep cached desc
                             Mesh* m = en.mesh;
                             MaterialDesc md;
-                            if (patchMatDescs && memoMat && m->material().get() == memoMat) {
+                            if (patchMatDescs && memoMat && m->material().get() == memoMat &&
+                                !dynamic_cast<const DisplacedMesh*>(m)) {
                                 md = memoMd;
                                 md.materialAssetIdx = matDescsCached_[i].materialAssetIdx;
                             } else {
@@ -2347,6 +2363,7 @@ void VulkanRenderer::Impl::ensureSceneBuilt(Object3D& scene, Camera& camera) {
                                 spanFlags = tlasInstanceFlags(cmd);
                                 spanCutout = cutoutRayDistance_ > 0.f && cutoutCaster(cmd);
                             }
+                            if (spanMask == kRayMaskOpaque) spanMask |= e0.isDisplaced ? kRayMaskSea : kRayMaskLand;   //
                             if (e0.camAttached) spanMask = kRayMaskNoShadow;
                             if (e0.sensorOnly)
                                 spanMask = sensorOnlySurfaces_ ? kRayMaskSensorOnly : 0u;
@@ -2623,7 +2640,11 @@ void VulkanRenderer::Impl::ensureSceneBuilt(Object3D& scene, Camera& camera) {
                         for (const auto& c : st->cascades) {
                             if (c.dyn && c.dyn->ht().view == oceanFineHeightView) {
                                 oceanFineHeightView = oceanFineHeightDummy.view;
+                                oceanDisplace0View  = oceanFineHeightDummy.view;
+                                oceanDisplace2View  = oceanFineHeightDummy.view;
                                 oceanFineTileSize   = 0.0f;
+                                for (int i = 0; i < 3; ++i) inspectHeight_[i] = inspectDisplace_[i] = oceanFineHeightDummy.view;
+                                inspectOcean_ = {};
                             }
                         }
                         if (st->foamImage.view == oceanFoamView) {
@@ -2640,6 +2661,8 @@ void VulkanRenderer::Impl::ensureSceneBuilt(Object3D& scene, Camera& camera) {
                         if (st->scratchA.image != VK_NULL_HANDLE) vmaDestroyImage(ctx->allocator(), st->scratchA.image, st->scratchA.alloc);
                         if (st->foamImage.view  != VK_NULL_HANDLE) vkDestroyImageView(ctx->device(), st->foamImage.view, nullptr);
                         if (st->foamImage.image != VK_NULL_HANDLE) vmaDestroyImage(ctx->allocator(), st->foamImage.image, st->foamImage.alloc);
+                        if (st->foamPrevImage.view  != VK_NULL_HANDLE) vkDestroyImageView(ctx->device(), st->foamPrevImage.view, nullptr);
+                        if (st->foamPrevImage.image != VK_NULL_HANDLE) vmaDestroyImage(ctx->allocator(), st->foamPrevImage.image, st->foamPrevImage.alloc);
                         // Host-side state buffers — same set the renderer
                         // teardown destroys; missing them here leaked the
                         // readback trio + foam/wake SSBOs on every scene
@@ -2648,7 +2671,9 @@ void VulkanRenderer::Impl::ensureSceneBuilt(Object3D& scene, Camera& camera) {
                             for (auto& b : ring) destroyBuffer(ctx->allocator(), b);
                         for (auto& ring : st->externalStaging) for (auto& b : ring) destroyBuffer(ctx->allocator(), b);
                         destroyBuffer(ctx->allocator(), st->foamDisturbBuffer);
+                        destroyBuffer(ctx->allocator(), st->foamAuditBuffer);
                         for (auto& b : st->vesselBuffer) destroyBuffer(ctx->allocator(), b);
+                for (auto& b : st->lodBuffer) destroyBuffer(ctx->allocator(), b);
                         // PhillipsSpectrum / DynamicSpectrum / IFFT destructors
                         // run on unique_ptr reset.
                         it = displacedStates.erase(it);
@@ -2814,6 +2839,10 @@ void VulkanRenderer::Impl::ensureSceneBuilt(Object3D& scene, Camera& camera) {
                     recPtr = st->blas.get();
                 } else if (en.isDisplaced) {
                     auto* dm = static_cast<DisplacedMesh*>(m);
+                    if (dm->cdlod) {
+                        const auto& ce=camera.matrixWorld->elements;
+                        dm->lodEyeX=ce[12]; dm->lodEyeZ=ce[14]; dm->lodEyeHeight=ce[13]-dm->matrixWorld->elements[13];
+                    }
                     const bool existed = displacedStates.count(dm) > 0;
                     auto* st = ensureDisplacedState(*dm);
                     if (!st) continue;
@@ -3059,7 +3088,8 @@ void VulkanRenderer::Impl::ensureSceneBuilt(Object3D& scene, Camera& camera) {
                 // gets the same world-static fallback.
                 bool warpReproject = recPtr->interopWorldStatic;
                 if (en.isDisplaced) {
-                    warpReproject = static_cast<DisplacedMesh*>(m)->warp.halfRange > 0.0f;
+                    // Keep RT and raster history consistent for Eulerian foam.
+                    warpReproject = static_cast<DisplacedMesh*>(m)->warp.halfRange > 0.0f || (static_cast<DisplacedMesh*>(m)->cdlod && (!std::getenv("KRV_CDLOD_WORLD_HISTORY") || std::string(std::getenv("KRV_CDLOD_WORLD_HISTORY")) != "0"));
                 }
                 gdesc.prevVertexAddress =
                         (recPtr->prevVertex.handle != VK_NULL_HANDLE && !warpReproject)
@@ -3087,6 +3117,10 @@ void VulkanRenderer::Impl::ensureSceneBuilt(Object3D& scene, Camera& camera) {
                 // (setEmissiveCastsLight): its ray hits keep their emission.
                 gdesc.flags = (recPtr->packedMask << 1) | (recPtr->rtIndexCount ? 32u : 0u) |
                               (isGlowOnly(*en.mesh) ? 64u : 0u);
+                // Opt-in reflection-hit AOV: the same semantic class as the
+                // raster IDs, including hull geometry outside the camera view.
+                if (reflectionHitClasses)
+                    gdesc.flags |= (classIdForObject(*en.mesh) & 255u) << 8u;
                 geomDescs[i] = gdesc;
                 // Read-only: assignment of auto ids stays in the indirect draw
                 // builder so this cannot renumber what the Ids AOV reports.
@@ -3183,7 +3217,7 @@ void VulkanRenderer::Impl::ensureSceneBuilt(Object3D& scene, Camera& camera) {
                                     ? kRayMaskNoShadow// FP viewmodel: visible, never occludes
                                     : (!en.isDisplaced && alphaMaskGroup(md))
                                               ? kRayMaskAlpha
-                                              : kRayMaskOpaque;
+                                              : kRayMaskOpaque | (en.isDisplaced ? kRayMaskSea : kRayMaskLand);   //
                     instances.back().flags = tlasInstanceFlags(md);
                     // Cutout ray distance: the same bit classifyCutoutFar
                     // derives on lean frames, for this frame's camera.
@@ -3697,7 +3731,8 @@ VulkanRenderer::Impl::MaterialDesc VulkanRenderer::Impl::materialFromMesh(const 
             d.terrainRoughStrength = 0.f;
             d.terrainHeightBlend = 0.f;
             d.envMapIntensity = 1.f;// unscaled IBL: what every material that never sets it carries
-            d._padTerrain = 0.f;
+            const auto* ocean = dynamic_cast<const DisplacedMesh*>(&m);
+            d.oceanPeakWavelength = ocean ? ocean->reflectionPeakWavelength : 0.f;
             for (int bi = 0; bi < 4; ++bi) {
                 d.terrainBandAlbedoTex[bi] = -1;
                 d.terrainBandNormalTex[bi] = -1;

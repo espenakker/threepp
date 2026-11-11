@@ -648,6 +648,7 @@ namespace threepp {
         float mediumBaseYThisFrame_   = 0.0f;
         float mediumFalloffThisFrame_ = 1.0e6f;
         float mediumNoiseThisFrame_   = 0.0f;
+        float mediumFloorThisFrame_   = 0.0f;// the uniform haze under an explicit layer (keepSceneFog)
         // Air-fog single-scattering tint (= scene.fog colour when present, else
         // white — mirrors the shade pass's medAlbedo). The overlay-fog snapshot
         // fades particles toward this (× no env, the accepted particle-domain
@@ -681,6 +682,7 @@ namespace threepp {
         float heightFogBaseY_      = 0.0f;
         float heightFogFalloff_    = 80.0f;
         float heightFogNoiseAmount_= 0.6f;
+        bool  heightFogKeepSceneFog_ = false;// HeightFogSettings::keepSceneFog
 
         // Environment equirect (HDR float) used by the primary miss
         // for backgrounds and by closest-hit for a single mirror-reflection
@@ -688,6 +690,7 @@ namespace threepp {
         // valid; replaced lazily when the scene's environment / background
         // texture is set or changed.
         Image2D envImage{};
+        Image2D sunBackgroundImage{}; // camera-only disc-free table
         unsigned int envTextureIdUploaded = 0xFFFFFFFFu;
         bool envIsDefault  = true;
         bool envIsBgColor  = false;
@@ -714,6 +717,8 @@ namespace threepp {
         // chop detail (FFT cells finer than the 1 m mesh resolves).
         Image2D oceanFineHeightDummy{};
         VkImageView oceanFineHeightView   = VK_NULL_HANDLE;// either dummy or cascade-2 view
+        VkImageView oceanDisplace0View    = VK_NULL_HANDLE;// dummy or the swell cascade's displacement
+        VkImageView oceanDisplace2View    = VK_NULL_HANDLE;// dummy or the fine cascade's
         VkSampler   oceanFineHeightSampler = VK_NULL_HANDLE;
         float       oceanFineTileSize     = 0.f;          // 0 disables sampling in shader
 
@@ -726,6 +731,11 @@ namespace threepp {
         VkImageView oceanFoamView   = VK_NULL_HANDLE;
         VkSampler   oceanFoamSampler = VK_NULL_HANDLE;
         float       oceanFoamTileSize = 0.f;              // 0 disables sampling
+        // The ocean's far-field skirt as the deferred shade banks it (see
+        // DisplacedMesh::Skirt): centre XZ, the Chebyshev distances over which
+        // its displacement fades out, and the long waves' mean square slope.
+        float       oceanSkirt[5] = {0.f, 0.f, 0.f, 0.f, 0.f};
+        float       rainRate = 0.f;   // rain on the water (mm/h), VulkanRenderer::setRainRate
         // The wake field's state images (deferred shade binding 78): the live
         // ocean's, or WakeFieldPipeline's 1x1 dummy. The shade samples it only
         // through the patch table the ocean's GeometryDesc::foamAddress names.
@@ -1379,6 +1389,7 @@ namespace threepp {
         // THREEPP_DENOISE=0 disables the deferred SVGF denoiser from the
         // environment — an A/B discriminator for "is this artifact shading or
         // temporal/denoise?" without plumbing a flag through every example.
+        bool denoiseFeedback_ = true;// setDenoiseFeedback
         bool denoiseEnabled_ = []() {
             const char* e = std::getenv("THREEPP_DENOISE");
             return !(e && e[0] == '0');
@@ -1999,6 +2010,7 @@ namespace threepp {
         // DLSS is the ACTIVE upscaler this frame: available AND runtime-enabled.
         // Outranks FSR (see useFsr) and forces the projection jitter on, like FSR.
         [[nodiscard]] bool useDlss() const {
+            if (inspectField()) return false;
 #if defined(THREEPP_WITH_DLSS)
             return dlssActive_ && dlssEnabled_;
 #else
@@ -2010,6 +2022,7 @@ namespace threepp {
         // Drives the record branch and the jitter source (FSR needs jitter, so it
         // also forces the projection jitter on — see uploadRasterCameraUbo).
         [[nodiscard]] bool useFsr() const {
+            if (inspectField()) return false;
 #if defined(THREEPP_WITH_FSR)
             return fsrActive_ && fsrEnabled_ && !useDlss();
 #else
@@ -2512,6 +2525,15 @@ namespace threepp {
         // VulkanRenderer::LightingView as an integer (0 = the lit frame);
         // the primary view's denoise recombine reads it.
         uint32_t lightingView_ = 0;
+        uint32_t inspectMode_ = 0, inspectSolo_ = 0, inspectLastFrame_ = 0;
+        int inspectX_ = -1, inspectY_ = -1;
+        bool inspectFrozen_ = false;
+        std::unordered_map<const DisplacedMesh*, double> inspectFrozenOceanTimes_;
+        OceanInspectSample inspectOcean_{};
+        std::vector<vulkan::Buffer> inspectBuffers_;
+        VkImageView inspectHeight_[3]{}, inspectDisplace_[3]{};
+        [[nodiscard]] bool inspectField() const { return !view().secondary && inspectMode_ > 0 && (inspectMode_ < 16 || inspectMode_ == 17); }
+
 
         // (cameraUbos moved to ViewContext.)
 
@@ -5058,6 +5080,7 @@ namespace threepp {
         // jitter. Read by both camera UBO uploads (the raster jitter gate)
         // and by the two resolve calls (blend alpha 1 = passthrough).
         [[nodiscard]] bool viewTaaOff() const {
+            if (inspectField()) return true;
             return !view().taaEnabled && (view().secondary || !(useFsr() || useDlss()));
         }
         // Allocate / free everything a SECONDARY view owns. Both assume the

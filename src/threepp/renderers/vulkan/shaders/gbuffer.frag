@@ -293,7 +293,11 @@ void main() {
     // sided (cull-back) meshes never produce back fragments, so this is a no-op
     // for them; done BEFORE the normal-map TBN so perturbation is relative to the
     // correctly-oriented surface.
-    if (!gl_FrontFacing) N = -N;
+    // Water is a medium interface: retain the outward normal. Facing it to
+    // the camera here loses the air/water side at a grazing crest, where the
+    // smooth normal and triangle visibility can disagree. The water BSDF
+    // chooses its side from the camera medium instead.
+    if (!gl_FrontFacing && (vFlags & 1u) == 0u) N = -N;
 
     // Geometric (pre-normal-map) normal — drives the detail triplanar weights
     // below (the world-XZ detail projection stretches into vertical streaks on
@@ -802,7 +806,11 @@ void main() {
     // mesh) so it does NOT false-reset, but DIFFER for a real disocclusion (a
     // trail revealing another surface). Comparing curr-vs-prev depth instead would
     // wrongly reset any surface that moves in depth → dust on animated meshes.
-    outMotion = vec4(motion, vPrevClip.z / vPrevClip.w, 0.0);
+    // Preserve small water-normal components as signed half floats. Encoding
+    // a near-zero slope around 0.5 loses precision at grazing reflection angles.
+    // Motion consumers use .xyz; .w and outUv.w are otherwise unused. Resolve
+    // copies both from the same dominant sample.
+    outMotion = vec4(motion, vPrevClip.z / vPrevClip.w, isWater ? N.x : 0.0);
 
     // .x = per-frame visible index +1 (clear-to-0 = sky, matches
     // deferred_shade.comp's gbufIdsTex.x convention). .y = stable per-object id (host-assigned; 0 when
@@ -820,5 +828,5 @@ void main() {
     const float fp2 = max(dot(duvx, duvx), dot(duvy, duvy));
     const float lodBias = 0.5 * log2(max(fp2, 1e-32));
 
-    outUv = vec4(vUv, lodBias, 0.0);
+    outUv = vec4(vUv, lodBias, isWater ? N.z : 0.0);
 }

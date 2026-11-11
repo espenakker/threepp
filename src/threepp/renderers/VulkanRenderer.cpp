@@ -25,8 +25,144 @@
 
 // stb_image_write - implementation is compiled in utils/StbImageWrite.cpp.
 #include "stb_image_write.h"
+#include <fstream>
 
 namespace threepp {
+    void VulkanRenderer::writeMeshAudit(const DisplacedMesh& dm, const std::string& prefix) {
+        const char* enabled=std::getenv("KRV_MESH_AUDIT");
+        if(!enabled || std::string(enabled)!="1") return;
+        auto& impl=*core(); auto* ctx=impl.ctx.get();
+        const auto it=impl.displacedStates.find(&dm);
+        if(!ctx || it==impl.displacedStates.end() || !it->second->blas) return;
+        auto& st=*it->second;
+        // An explicit device->host memory dependency, followed by fence wait
+        // and invalidation, makes the compute-written host-visible BLAS visible.
+        VkCommandPoolCreateInfo ci{}; ci.sType=VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+        ci.flags=VK_COMMAND_POOL_CREATE_TRANSIENT_BIT; ci.queueFamilyIndex=ctx->queueFamilies().graphics;
+        VkCommandPool pool; vulkan::check(vkCreateCommandPool(ctx->device(),&ci,nullptr,&pool),"sea audit pool");
+        VkCommandBufferAllocateInfo ai{}; ai.sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        ai.commandPool=pool; ai.level=VK_COMMAND_BUFFER_LEVEL_PRIMARY; ai.commandBufferCount=1;
+        VkCommandBuffer cb; vulkan::check(vkAllocateCommandBuffers(ctx->device(),&ai,&cb),"sea audit cb");
+        VkCommandBufferBeginInfo bi{}; bi.sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        vulkan::check(vkBeginCommandBuffer(cb,&bi),"sea audit begin");
+        VkMemoryBarrier mb{}; mb.sType=VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        mb.srcAccessMask=VK_ACCESS_MEMORY_WRITE_BIT; mb.dstAccessMask=VK_ACCESS_HOST_READ_BIT;
+        vkCmdPipelineBarrier(cb,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,VK_PIPELINE_STAGE_HOST_BIT,0,1,&mb,0,nullptr,0,nullptr);
+        vulkan::check(vkEndCommandBuffer(cb),"sea audit end");
+        VkFenceCreateInfo fi{}; fi.sType=VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        VkFence fence; vulkan::check(vkCreateFence(ctx->device(),&fi,nullptr,&fence),"sea audit fence");
+        VkSubmitInfo si{}; si.sType=VK_STRUCTURE_TYPE_SUBMIT_INFO; si.commandBufferCount=1; si.pCommandBuffers=&cb;
+        vulkan::check(vkQueueSubmit(ctx->graphicsQueue(),1,&si,fence),"sea audit submit");
+        vulkan::check(vkWaitForFences(ctx->device(),1,&fence,VK_TRUE,UINT64_MAX),"sea audit wait");
+        void* mapped=nullptr;
+        vulkan::check(vmaMapMemory(ctx->allocator(),st.blas->vertex.alloc,&mapped),"sea audit map");
+        vulkan::invalidateHostReads(ctx->allocator(),st.blas->vertex.alloc);
+        std::ofstream f(prefix+".mesh.raw",std::ios::binary);
+        f.write(static_cast<const char*>(mapped),static_cast<std::streamsize>(st.vertexCount)*12);
+        std::ofstream info(prefix+".mesh.json");
+        info << "{\"nx\":" << st.gridDimX << ",\"nz\":" << st.gridDimZ
+             << ",\"centre\":[" << dm.warp.centerX << "," << dm.warp.centerZ << "]"
+             << ",\"half_range\":" << dm.warp.halfRange
+             << ",\"coef\":" << dm.warp.coefA
+             << ",\"world_y\":" << dm.position.y
+             << ",\"blas_bytes\":" << st.blas->storage.size
+             << ",\"scratch_bytes\":" << st.blas->blasScratch.size
+             << ",\"vertex_bytes\":" << st.blas->vertex.size
+             << ",\"normal_bytes\":" << st.blas->normal.size
+             << ",\"index_bytes\":" << st.blas->index.size
+             << ",\"uv_bytes\":" << st.blas->uv.size
+             << ",\"previous_bytes\":" << st.blas->prevVertex.size
+             << ",\"refit_counter\":" << st.blasRefitCounter
+             << ",\"rt_proxy_indices\":" << st.blas->rtIndexCount << "}";
+        // Actual compute output against the unchanged production CPU query.
+        std::ofstream query(prefix+".query.csv");
+        query << "index,x,z,drawn,legacy_cpu,error,distance,origin_distance,lod_cpu,lod_error\n";
+        const auto* v=static_cast<const float*>(mapped);
+        for (uint32_t i=0;i<st.vertexCount;i+=std::max(1u,st.vertexCount/8192u)) {
+            const float x=v[3*i], y=v[3*i+1], z=v[3*i+2];
+            if (x==0.f && y==0.f && z==0.f) continue;
+            const float cpu=dm.sampleUnfilteredHeight(x,z);
+            query << i << ',' << x << ',' << z << ',' << y << ',' << cpu << ',' << y-cpu << ','
+                  << std::hypot(x-dm.lodEyeX,z-dm.lodEyeZ) << ',' << std::hypot(x,z) << ',' << dm.sampleLodHeight(x,z) << ',' << y-dm.sampleLodHeight(x,z) << '\n';
+        }
+        std::ofstream triQuery(prefix+".triquery.csv");
+        triQuery << "index,x,z,drawn,legacy_cpu,error,distance,origin_distance,lod_cpu,lod_error\n";
+        const auto* indices=dm.geometry()->getIndex();
+        const unsigned triangleCount=unsigned(indices->count()/3);
+        for (unsigned t=0;t<triangleCount;t+=std::max(1u,triangleCount/8192u)) {
+            float x=0,y=0,z=0;
+            for(unsigned k=0;k<3;++k) {
+                unsigned i=unsigned(indices->getX(3*t+k));
+                x+=v[3*i]/3.f; y+=v[3*i+1]/3.f; z+=v[3*i+2]/3.f;
+            }
+            if (std::hypot(x,z)<160.f) continue;
+            const float cpu=dm.sampleUnfilteredHeight(x,z),lod=dm.sampleLodHeight(x,z);
+            triQuery << t << ',' << x << ',' << z << ',' << y << ',' << cpu << ',' << y-cpu << ','
+                     << std::hypot(x-dm.lodEyeX,z-dm.lodEyeZ) << ',' << std::hypot(x,z) << ',' << lod << ',' << y-lod << '\n';
+        }
+        if (dm.cdlod) {
+            std::ofstream patches(prefix+".patches.csv");
+            patches << "slot,x,z,spacing\n";
+            for (const auto& kv:st.lodSlots) patches << kv.second << ',' << kv.first[0] << ',' << kv.first[1] << ',' << kv.first[2] << '\n';
+        }
+        vmaUnmapMemory(ctx->allocator(),st.blas->vertex.alloc);
+        vkDestroyFence(ctx->device(),fence,nullptr); vkDestroyCommandPool(ctx->device(),pool,nullptr);
+
+    }
+
+
+
+
+
+
+
+    std::vector<std::array<float,5>> VulkanRenderer::readSeaQueryVertices(const DisplacedMesh& dm) {
+        const char* enabled=std::getenv("KRV_SEA_QUERY_AUDIT");
+        if(!enabled || std::string(enabled)!="1") return {};
+        auto& impl=*core(); auto* ctx=impl.ctx.get();
+        const auto it=impl.displacedStates.find(&dm);
+        if(!ctx || it==impl.displacedStates.end() || !it->second->blas) return {};
+        auto& st=*it->second;
+        // An explicit device->host memory dependency, followed by fence wait
+        // and invalidation, makes the compute-written host-visible BLAS visible.
+        VkCommandPoolCreateInfo ci{}; ci.sType=VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+        ci.flags=VK_COMMAND_POOL_CREATE_TRANSIENT_BIT; ci.queueFamilyIndex=ctx->queueFamilies().graphics;
+        VkCommandPool pool; vulkan::check(vkCreateCommandPool(ctx->device(),&ci,nullptr,&pool),"sea audit pool");
+        VkCommandBufferAllocateInfo ai{}; ai.sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        ai.commandPool=pool; ai.level=VK_COMMAND_BUFFER_LEVEL_PRIMARY; ai.commandBufferCount=1;
+        VkCommandBuffer cb; vulkan::check(vkAllocateCommandBuffers(ctx->device(),&ai,&cb),"sea audit cb");
+        VkCommandBufferBeginInfo bi{}; bi.sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        vulkan::check(vkBeginCommandBuffer(cb,&bi),"sea audit begin");
+        VkMemoryBarrier mb{}; mb.sType=VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        mb.srcAccessMask=VK_ACCESS_MEMORY_WRITE_BIT; mb.dstAccessMask=VK_ACCESS_HOST_READ_BIT;
+        vkCmdPipelineBarrier(cb,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,VK_PIPELINE_STAGE_HOST_BIT,0,1,&mb,0,nullptr,0,nullptr);
+        vulkan::check(vkEndCommandBuffer(cb),"sea audit end");
+        VkFenceCreateInfo fi{}; fi.sType=VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        VkFence fence; vulkan::check(vkCreateFence(ctx->device(),&fi,nullptr,&fence),"sea audit fence");
+        VkSubmitInfo si{}; si.sType=VK_STRUCTURE_TYPE_SUBMIT_INFO; si.commandBufferCount=1; si.pCommandBuffers=&cb;
+        vulkan::check(vkQueueSubmit(ctx->graphicsQueue(),1,&si,fence),"sea audit submit");
+        vulkan::check(vkWaitForFences(ctx->device(),1,&fence,VK_TRUE,UINT64_MAX),"sea audit wait");
+        void* mapped=nullptr;
+        vulkan::check(vmaMapMemory(ctx->allocator(),st.blas->vertex.alloc,&mapped),"sea audit map");
+        vulkan::invalidateHostReads(ctx->allocator(),st.blas->vertex.alloc);
+        const auto* data=static_cast<const float*>(mapped);
+        std::vector<std::array<float,5>> out;
+        // Dense centre plus wide-domain samples, including the pile and hull.
+        for(uint32_t j=0;j<st.gridDimZ;j+=8) for(uint32_t i=0;i<st.gridDimX;i+=8) {
+            const float u=float(i)/float(st.gridDimX-1),v=float(j)/float(st.gridDimZ-1);
+            float x=(u-.5f)*st.planeSizeX,z=-(v-.5f)*st.planeSizeZ;
+            if(dm.warp.halfRange>0) {
+                const float a=dm.warp.coefA,un=2*u-1,vn=2*v-1;
+                x=dm.warp.centerX+(a*un+(1-a)*un*un*un)*dm.warp.halfRange;
+                z=dm.warp.centerZ-(a*vn+(1-a)*vn*vn*vn)*dm.warp.halfRange;
+            }
+            const size_t k=3*(size_t(j)*st.gridDimX+i);
+            out.push_back({x,z,data[k],data[k+1],data[k+2]});
+        }
+        vmaUnmapMemory(ctx->allocator(),st.blas->vertex.alloc);
+        vkDestroyFence(ctx->device(),fence,nullptr); vkDestroyCommandPool(ctx->device(),pool,nullptr);
+        return out;
+    }
 
 
     // Deferred scene dispatch: the passes between the G-buffer/AS head and
@@ -44,6 +180,21 @@ namespace threepp {
         using Stage  = vulkan::DeferredShade::Stage;
         const uint32_t f = currentFrame;
         auto& shade = *view().deferredShade_;
+        // reflhits uses the existing diagnostic module, keeping its counters
+        // and control flow out of the production shader entirely.
+        const char* pathVis = std::getenv("KRV_REFL_PATH_VIS");
+        const bool reflectionPathVisibility = pathVis && std::string(pathVis) == "1";
+        const char* horizonVis = std::getenv("KRV_REFL_HORIZON_VIS");
+        const bool reflectionHorizonVisibility = horizonVis && std::string(horizonVis) == "1";
+        if (reflectionHorizonVisibility && inspectBuffers_.empty()) {
+            inspectBuffers_.resize(kFramesInFlight);
+            for (auto& b : inspectBuffers_)
+                b = vulkan::createBuffer(ctx->allocator(), ctx->device(), sizeof(OceanInspectSample),
+                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                    VMA_MEMORY_USAGE_AUTO_PREFER_HOST, VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT);
+        }
+        shade.inspectionEnabled = reflectionPathVisibility || reflectionHorizonVisibility ||
+            (!view().secondary && (inspectMode_ != 0 || envKnobs_.waterDebug == 17u));
 
         // sceneHdr rests in GENERAL between stages; imported first so the
         // descriptor-derived imports below don't pick its layout.
@@ -84,7 +235,7 @@ namespace threepp {
             // A sensor frame at the instant of the last update (sub-renders between two ticks hold the
             // scene) leaves the grid as that update left it.
             const double probeNow = frameNowSec();
-            const bool probeRepeat = frameIsSensor_ && probeLastT_ == probeNow;
+            const bool probeRepeat = (frameIsSensor_ || inspectFrozen_) && probeLastT_ == probeNow;
             probeLastT_ = probeNow;
             if (probeGIEnabled_ && !view().secondary && !probeRepeat) {
                 if (probeGridDirty_) {
@@ -137,7 +288,7 @@ namespace threepp {
         // shadeBActive (flags bit 7) tells it whether to additionally
         // reserve the geometry-minority weight for dispatch B or fold
         // it into the dominant surface.
-        const bool shadeBActive = viewMsaaSamples > 1 && gbufShadeBEnabled_;
+        const bool shadeBActive = viewMsaaSamples > 1 && gbufShadeBEnabled_ && !inspectField();
         // Clustered light culling: per-cell light lists for the shade's
         // analytic split (all point/spot lights, no 8-per-type cap).
         if (clusterLightCountThisFrame_ > 0 && asyncPart) {
@@ -244,6 +395,8 @@ namespace threepp {
         shadeParams.fireflyClamp       = fireflyClamp_;
         shadeParams.oceanFineTileSize  = oceanFineTileSize;
         shadeParams.oceanFoamTileSize  = oceanFoamTileSize;
+        std::copy(std::begin(oceanSkirt), std::end(oceanSkirt), shadeParams.oceanSkirt);
+        shadeParams.rainRate = rainRate;
         shadeParams.denoise            = viewDenoise;
         shadeParams.restirDI           = restirDIEnabled_ && !view().sensorMode;
         shadeParams.volFog             = deferredVolFog_;
@@ -279,9 +432,31 @@ namespace threepp {
         shadeParams.probeGi            = probeGI_ && probeGIEnabled_;// what updateGridUbo wrote
 
         {
-            auto pass = g.addPass("shade", [this, f, shadeParams](VkCommandBuffer c) {
+            auto pass = g.addPass("shade", [this, f, shadeParams, reflectionHorizonVisibility](VkCommandBuffer c) {
                 gpuTimings_->begin(c, TP_DeferredShade, f);
-                view().deferredShade_->recordDispatch(c, f, shadeParams);
+                auto params = shadeParams;
+                if (reflectionHorizonVisibility || (inspectMode_ != 0 && !view().secondary)) {
+                    auto data = inspectOcean_;
+                    data.renderWidth = params.width; data.renderHeight = params.height;
+                    const int dw = std::max(1, int(regionSwapExt_.width)), dh = std::max(1, int(regionSwapExt_.height));
+                    data.displayX = inspectX_ < 0 ? dw/2 : std::clamp(inspectX_,0,dw-1);
+                    data.displayY = inspectY_ < 0 ? dh/2 : std::clamp(inspectY_,0,dh-1);
+                    data.pixelX = std::min(int((double(data.displayX)+0.5)*params.width/dw),int(params.width)-1);
+                    data.pixelY = std::min(int((double(data.displayY)+0.5)*params.height/dh),int(params.height)-1);
+                    data.valid = 0;
+                    vulkan::uploadHostVisible(ctx->allocator(), inspectBuffers_[f], &data, sizeof(data));
+                    params.inspectMode = inspectMode_; params.inspectSolo = inspectSolo_;
+                    params.inspectAddress = inspectBuffers_[f].address;
+                    inspectLastFrame_ = f;
+                }
+                view().deferredShade_->recordDispatch(c, f, params);
+                if (params.inspectMode != 0) {
+                    VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+                    barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+                    barrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+                    vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
+                                         0, 1, &barrier, 0, nullptr, 0, nullptr);
+                }
                 gpuTimings_->end(c, TP_DeferredShade, f);// pathTraceMs = deferred SHADE only
             });
             shade.declare(g, pass, Stage::Shade, f);
@@ -312,10 +487,11 @@ namespace threepp {
         // reflection gloss reconstruction) and composite them into sceneHdr:
         // the filter reads the indirect 5×5 neighbourhood and read-modify-
         // writes sceneHdr.
-        if (viewDenoise) {
+        if (viewDenoise && !inspectField()) {
             const uint32_t lightingView = view().secondary ? 0u : lightingView_;
             auto pass = g.addPass("denoise", [this, f, viewMsaaSamples, shadeBActive, lightingView](VkCommandBuffer c) {
                 gpuTimings_->begin(c, TP_Denoise, f);// denoiseMs = deferred SVGF (4 GI passes + reflection pass)
+                view().deferredShade_->historyFeedback = denoiseFeedback_;
                 view().deferredShade_->recordFilterAndComposite(c, f, regionRenderExt_.width, regionRenderExt_.height,
                                                                 viewMsaaSamples, shadeBActive, preExpBits_,
                                                                 lightingView);
@@ -1826,6 +2002,95 @@ namespace threepp {
         return true;
     }
 
+    void VulkanRenderer::setRainRate(float mmPerHour) { core()->rainRate = std::max(0.f, mmPerHour); }
+
+    bool VulkanRenderer::readOceanFoam(const DisplacedMesh& mesh, std::vector<float>& out, uint32_t& res, float& tileSize) {
+        auto& impl = *core();
+        auto* ctx  = impl.ctx.get();
+        if (!ctx || impl.frameSerial_ == 0) return false;
+        const auto it = impl.displacedStates.find(&mesh);
+        if (it == impl.displacedStates.end() || !it->second || it->second->foamImage.image == VK_NULL_HANDLE) return false;
+        const auto& img = it->second->foamImage;
+        vkDeviceWaitIdle(ctx->device());
+        // The accumulator rests in GENERAL (a legal transfer source); one global barrier
+        // makes the retired compute writes visible to the copy.
+        const VkDeviceSize bytes = static_cast<VkDeviceSize>(img.width) * img.height * 16;   // RGBA32F (foam, freshness, streaks)
+        vulkan::Buffer staging = vulkan::createBuffer(ctx->allocator(), ctx->device(), bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                                      VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
+                                                      VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT);
+        VkCommandPoolCreateInfo cpci{};
+        cpci.sType            = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+        cpci.flags            = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+        cpci.queueFamilyIndex = ctx->queueFamilies().graphics;
+        VkCommandPool cpool = VK_NULL_HANDLE;
+        vulkan::check(vkCreateCommandPool(ctx->device(), &cpci, nullptr, &cpool), "vkCreateCommandPool(readOceanFoam)");
+        VkCommandBufferAllocateInfo cbai{};
+        cbai.sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        cbai.commandPool        = cpool;
+        cbai.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cbai.commandBufferCount = 1;
+        VkCommandBuffer cb = VK_NULL_HANDLE;
+        vulkan::check(vkAllocateCommandBuffers(ctx->device(), &cbai, &cb), "vkAllocateCommandBuffers(readOceanFoam)");
+        VkCommandBufferBeginInfo bi{};
+        bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        vulkan::check(vkBeginCommandBuffer(cb, &bi), "vkBeginCommandBuffer(readOceanFoam)");
+        VkMemoryBarrier mb{};
+        mb.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        mb.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+        mb.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
+        VkBufferImageCopy region{};
+        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        region.imageSubresource.layerCount = 1;
+        region.imageExtent                 = {img.width, img.height, 1};
+        vkCmdCopyImageToBuffer(cb, img.image, VK_IMAGE_LAYOUT_GENERAL, staging.handle, 1, &region);
+        vulkan::check(vkEndCommandBuffer(cb), "vkEndCommandBuffer(readOceanFoam)");
+        VkFenceCreateInfo fci{};
+        fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        VkFence fence = VK_NULL_HANDLE;
+        vulkan::check(vkCreateFence(ctx->device(), &fci, nullptr, &fence), "vkCreateFence(readOceanFoam)");
+        VkSubmitInfo si{};
+        si.sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        si.commandBufferCount = 1;
+        si.pCommandBuffers    = &cb;
+        vulkan::check(vkQueueSubmit(ctx->graphicsQueue(), 1, &si, fence), "vkQueueSubmit(readOceanFoam)");
+        vulkan::check(vkWaitForFences(ctx->device(), 1, &fence, VK_TRUE, UINT64_MAX), "vkWaitForFences(readOceanFoam)");
+        out.resize(static_cast<size_t>(img.width) * img.height);
+        void* mapped = nullptr;
+        vulkan::check(vmaMapMemory(ctx->allocator(), staging.alloc, &mapped), "vmaMapMemory(readOceanFoam)");
+        vulkan::invalidateHostReads(ctx->allocator(), staging.alloc, 0, bytes);
+        const float* rg = static_cast<const float*>(mapped);   // the foam is the red channel
+        const size_t ch = std::getenv("KRV_FOAM_READ_CH") ? std::min<size_t>(3, std::stoul(std::getenv("KRV_FOAM_READ_CH"))) : 0;   // a diagnostic, another channel
+        for (size_t i = 0; i < out.size(); ++i) out[i] = rg[4 * i + ch];
+        vmaUnmapMemory(ctx->allocator(), staging.alloc);
+        vkDestroyFence(ctx->device(), fence, nullptr);
+        vkDestroyCommandPool(ctx->device(), cpool, nullptr);
+        vulkan::destroyBuffer(ctx->allocator(), staging);
+        res      = img.width;
+        tileSize = it->second->foamTileSize;
+        return true;
+    }
+
+    bool VulkanRenderer::readOceanFoamDiagnostics(const DisplacedMesh& mesh, std::vector<float>& out, uint32_t& res,
+                                                 float& tileSize, float& time, float& dt) {
+        auto& impl = *core();
+        auto* ctx = impl.ctx.get();
+        if (!ctx || !std::getenv("KRV_FOAM_DIAGNOSTICS")) return false;
+        const auto it = impl.displacedStates.find(&mesh);
+        if (it == impl.displacedStates.end() || !it->second || !it->second->foamAuditBuffer.handle) return false;
+        const auto& st = *it->second;
+        vkDeviceWaitIdle(ctx->device()); // caller submits the frame before this audit
+        void* mapped = nullptr;
+        vulkan::check(vmaMapMemory(ctx->allocator(), st.foamAuditBuffer.alloc, &mapped), "vmaMapMemory(foam audit)");
+        vulkan::invalidateHostReads(ctx->allocator(), st.foamAuditBuffer.alloc, 0, st.foamAuditBuffer.size);
+        out.resize(size_t(st.foamRes) * st.foamRes * 4);
+        std::memcpy(out.data(), mapped, size_t(st.foamAuditBuffer.size));
+        vmaUnmapMemory(ctx->allocator(), st.foamAuditBuffer.alloc);
+        res = st.foamRes; tileSize = st.foamTileSize; time = st.foamAuditTime; dt = st.foamAuditDt;
+        return true;
+    }
+
     bool VulkanRenderer::readSceneHdrDebug(std::vector<uint8_t>& hdr, int& w, int& h) {
         auto& impl = *core();
         auto* ctx  = impl.ctx.get();
@@ -2203,6 +2468,50 @@ namespace threepp {
         return true;
     }
 
+    void VulkanRenderer::setOceanInspect(uint32_t field, uint32_t solo, int x, int y) {
+        auto& impl = *core();
+        static_assert(offsetof(OceanInspectSample, tile) == 16);
+        static_assert(offsetof(OceanInspectSample, pixelX) == 64);
+        static_assert(offsetof(OceanInspectSample, valid) == 72);
+        static_assert(offsetof(OceanInspectSample, worldX) == 84);
+        static_assert(offsetof(OceanInspectSample, fineThreshold) == 160);
+        const uint32_t mode = field == 16 ? 17u : field > 0 && field <= 15 ? field : (solo ? 16u : 0u);
+        if (mode && impl.inspectBuffers_.empty()) {
+            impl.inspectBuffers_.resize(kFramesInFlight);
+            for (auto& b : impl.inspectBuffers_)
+                b = vulkan::createBuffer(impl.ctx->allocator(), impl.ctx->device(), sizeof(OceanInspectSample),
+                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                    VMA_MEMORY_USAGE_AUTO_PREFER_HOST, VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT);
+        }
+        const uint32_t effectiveSolo = mode == 16u ? solo : 0u;
+        if (mode != impl.inspectMode_ || effectiveSolo != impl.inspectSolo_) resetTemporalHistory();
+        impl.inspectMode_ = mode;
+        // Field views always measure the unsuppressed shader.
+        impl.inspectSolo_ = effectiveSolo;
+        impl.inspectX_ = x; impl.inspectY_ = y;
+    }
+
+    bool VulkanRenderer::readOceanInspect(OceanInspectSample& sample) {
+        auto& impl = *core();
+        if (!impl.inspectMode_ || impl.inspectBuffers_.empty() || impl.frameSerial_ == 0) return false;
+        // Finish an open canvas frame before reading; readRGBPixels owns that submission protocol.
+        if (impl.frameState_ != Impl::FrameState::Idle) (void)readRGBPixels();
+        vulkan::check(vkDeviceWaitIdle(impl.ctx->device()), "ocean inspector readback wait");
+        const auto& b = impl.inspectBuffers_[impl.inspectLastFrame_];
+        void* ptr = nullptr;
+        vulkan::check(vmaMapMemory(impl.ctx->allocator(), b.alloc, &ptr), "ocean inspector map");
+        vulkan::invalidateHostReads(impl.ctx->allocator(), b.alloc);
+        std::memcpy(&sample, ptr, sizeof(sample));
+        vmaUnmapMemory(impl.ctx->allocator(), b.alloc);
+        return true;
+    }
+
+    void VulkanRenderer::setOceanInspectFrozen(bool frozen) {
+        auto& impl = *core();
+        if (impl.inspectFrozen_ != frozen) impl.inspectFrozenOceanTimes_.clear();
+        impl.inspectFrozen_ = frozen;
+    }
+
     void VulkanRenderer::setSimTime(double seconds) {
         core()->simTimeSec_ = seconds;
     }
@@ -2254,6 +2563,10 @@ namespace threepp {
 
     void VulkanRenderer::setDenoise(bool enabled) {
         core()->denoiseEnabled_ = enabled;
+    }
+
+    void VulkanRenderer::setDenoiseFeedback(bool enabled) {
+        core()->denoiseFeedback_ = enabled;
     }
 
     bool VulkanRenderer::denoise() const {
@@ -2695,6 +3008,7 @@ namespace threepp {
             pimpl_->heightFogBaseY_       = settings->baseY;
             pimpl_->heightFogFalloff_     = std::max(settings->falloff, 1.f);
             pimpl_->heightFogNoiseAmount_ = std::clamp(settings->noiseAmount, 0.f, 1.f);
+            pimpl_->heightFogKeepSceneFog_ = settings->keepSceneFog;
         } else {
             pimpl_->heightFogEnabled_ = false;
         }
@@ -2707,6 +3021,7 @@ namespace threepp {
         s.baseY       = pimpl_->heightFogBaseY_;
         s.falloff     = pimpl_->heightFogFalloff_;
         s.noiseAmount = pimpl_->heightFogNoiseAmount_;
+        s.keepSceneFog = pimpl_->heightFogKeepSceneFog_;
         return s;
     }
 

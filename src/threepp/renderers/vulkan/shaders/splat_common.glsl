@@ -279,7 +279,10 @@ layout(set = 0, binding = 19, scalar) uniform CloudUbo {
     float hfFalloff;
     float hfNoiseAmount;
     float shadowActive;
+    float epoch;
+    float hfFloor;      // the air medium's uniform background haze under the layer
 } clouds;
+#define AIR_FLOOR
 
 // Only the leading `ambient` and the sun list are read; a uniform block may be
 // shorter than the buffer bound to it, and the offsets of what it does declare
@@ -495,8 +498,8 @@ uint splatDepthBucket(float dist, float dMin, float dMax, float pLo, float pHi) 
 // Clipped at the waterline: splatMurkPathLength covers the submerged part.
 #include "height_fog.glsl"
 float splatHeightFogOd(vec3 a, vec3 b) {
-    return heightFogLegOpticalDepth(a, b, clouds.hfDensity, clouds.hfFalloff,
-                                    clouds.hfBaseY, fog.waterSurfaceY);
+    return airLegOpticalDepth(a, b, clouds.hfDensity, clouds.hfFalloff,
+                                    clouds.hfBaseY, fog.waterSurfaceY, clouds.hfFloor);
 }
 
 float splatMurkPathLength(vec3 a, vec3 b) {

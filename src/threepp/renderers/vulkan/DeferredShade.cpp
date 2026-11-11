@@ -5,9 +5,22 @@
 #include "threepp/renderers/vulkan/VulkanResources.hpp"
 #include "threepp/renderers/vulkan/shaders/vulkan_shared.h"// kMaxMaterialTextures
 
+#include "threepp/objects/UniformCurrent.hpp"
+#include "threepp/renderers/vulkan/shaders/deferred_shade.comp.current.spv.h"
+#include "threepp/renderers/vulkan/shaders/deferred_shade.comp.current_local.spv.h"
+#include "threepp/renderers/vulkan/shaders/deferred_shade.comp.current_nort.spv.h"
+#include "threepp/renderers/vulkan/shaders/deferred_shade.comp.current_cdlod.spv.h"
+#include "threepp/renderers/vulkan/shaders/deferred_shade.comp.current_cdlod_local.spv.h"
+#include <cstring>// std::strcmp (exact KRV_FRESH opt-in)
 #include <cstdlib>// std::getenv (THREEPP_VK_SHADOW_DWELL kill switch)
 
 #include "threepp/renderers/vulkan/shaders/deferred_shade.comp.spv.h"
+#include "threepp/renderers/vulkan/shaders/deferred_shade.comp.inspect.spv.h"
+#include "threepp/renderers/vulkan/shaders/deferred_shade.comp.inspect_local.spv.h"
+#include "threepp/renderers/vulkan/shaders/deferred_shade.comp.inspect_nort.spv.h"
+#include "threepp/renderers/vulkan/shaders/deferred_shade.comp.local.spv.h"
+#include "threepp/renderers/vulkan/shaders/deferred_shade.comp.cdlod.spv.h"
+#include "threepp/renderers/vulkan/shaders/deferred_shade.comp.cdlodlocal.spv.h"
 #include "threepp/renderers/vulkan/shaders/deferred_gi_filter.comp.spv.h"
 #include "threepp/renderers/vulkan/shaders/deferred_refl_filter.comp.spv.h"
 #include "threepp/renderers/vulkan/shaders/cluster_build.comp.spv.h"
@@ -39,7 +52,7 @@ namespace threepp::vulkan {
     // that no validation layer can see). Both tables are std::array of this
     // size now, filled through .at(), and the fill count is checked, so the
     // failure mode is a loud throw at init instead.
-    constexpr uint32_t kDeferredBindingCount = 79;
+    constexpr uint32_t kDeferredBindingCount = 88;
 
     // ParticleField density volumes bound at once (binding 67 is an array of
     // this many). KEEP IN SYNC with kMaxDensityFields in
@@ -69,6 +82,7 @@ namespace threepp::vulkan {
     DeferredShade::~DeferredShade() {
         VkDevice d = ctx_.device();
         for (auto& [key, perm] : shadePerms_) vkDestroyPipeline(d, perm, nullptr);
+        if (inspectMod_) vkDestroyShaderModule(d, inspectMod_, nullptr);
         if (shadeMod_)      vkDestroyShaderModule(d, shadeMod_, nullptr);
         if (giFilterPipe_)   vkDestroyPipeline(d, giFilterPipe_, nullptr);
         if (reflFilterPipe_) vkDestroyPipeline(d, reflFilterPipe_, nullptr);
@@ -257,6 +271,11 @@ namespace threepp::vulkan {
         // Its ripples: the slopes of the waves the producers make, mipped,
         // REPEAT and anisotropic. The same dummy when no ocean has any.
         set(79, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER); // ocean wake ripples (rgba16f 2D array, mipped)
+        set(80, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER); // ocean horizontal displacement, swell cascade (foam's rest position)
+        for (uint32_t i = 82; i <= 87; ++i) set(i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        set(81, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER); // ocean horizontal displacement, fine cascade
+
+        set(88, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER); // camera-only analytic sun background
 
         // Exact fit is the contract: a new binding must bump
         // kDeferredBindingCount, and rewriteDescriptors must gain the matching
@@ -293,7 +312,7 @@ namespace threepp::vulkan {
         VkPushConstantRange pc{};
         pc.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
         pc.offset = 0;
-        pc.size = 80;// 20×u32 (…, clusterLightCount, shadeMode, preExpBits)
+        pc.size = sizeof(ShadePush);// 26×u32 (…, preExpBits, the ocean skirt, pad)
         VkPipelineLayoutCreateInfo plci{};
         plci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
         plci.setLayoutCount = 1;
@@ -310,7 +329,17 @@ namespace threepp::vulkan {
             size_t count;
         };
         const auto spv = [](const auto& blob) { return Spv{blob, std::size(blob)}; };
-        const Spv shadeSpv    = rt ? spv(kDeferredShadeCompSpv) : spv(kDeferredShadeNoRtCompSpv);
+        const char* local = std::getenv("THREEPP_SHADE_EXPERIMENT");
+        const bool useLocal = local && *local == '1';
+        // the CDLOD shade variant follows the default mesh (CDLOD), KRV_MESH=warped selects the warped one
+        const char* meshMode=std::getenv("KRV_MESH");
+        const bool cdlod=!(meshMode && std::string(meshMode)=="warped");
+        const auto& current=UniformCurrent::environment();
+        Spv shadeSpv = current.enabled ? (rt ? (cdlod ? (useLocal ? spv(kDeferredShade_current_cdlod_local) : spv(kDeferredShade_current_cdlod)) : (useLocal ? spv(kDeferredShade_current_local) : spv(kDeferredShade_current))) : spv(kDeferredShade_current_nort)) : rt ? (cdlod ? (useLocal ? spv(kDeferredShadeCdlodLocalCompSpv) : spv(kDeferredShadeCdlodCompSpv)) : (useLocal ? spv(kDeferredShadeLocalCompSpv) : spv(kDeferredShadeCompSpv)))
+                                   : spv(kDeferredShadeNoRtCompSpv);
+        Spv inspectSpv = rt ? (useLocal ? spv(kDeferredShadeInspectLocalCompSpv) : spv(kDeferredShadeInspectCompSpv)) : spv(kDeferredShadeInspectNoRtCompSpv);
+
+        inspectReflection_ = reflectSpirvBindings(inspectSpv.words, inspectSpv.count);
         const Spv froxelSpv   = rt ? spv(kFroxelInjectCompSpv) : spv(kFroxelInjectNoRtCompSpv);
         const Spv particleSpv = rt ? spv(kParticleLightCompSpv) : spv(kParticleLightNoRtCompSpv);
 
@@ -470,7 +499,7 @@ namespace threepp::vulkan {
               "vkCreateComputePipelines(cloud_shadow)");
 
         // Half-res ray-traced AO + bent normals (rtao.comp) — same shared set 0
-        // and 80-byte ShadePush range as the shade itself.
+        // and ShadePush range as the shade itself.
         // Not without ray query: rtaoPipe_ stays null and the stage is never
         // recorded (the shade's AO term is then 1).
         VkShaderModule modAo = VK_NULL_HANDLE;
@@ -1057,6 +1086,19 @@ namespace threepp::vulkan {
             oceanRippleInfo.imageView   = in.oceanRippleView;
             oceanRippleInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
             setw(78, 79, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &oceanRippleInfo,    nullptr);
+            VkDescriptorImageInfo oceanDisp0Info = oceanFineInfo, oceanDisp2Info = oceanFineInfo;
+            oceanDisp0Info.imageView = in.oceanDisplace0View;
+            oceanDisp2Info.imageView = in.oceanDisplace2View;
+            setw(79, 80, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &oceanDisp0Info, nullptr);
+            setw(80, 81, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &oceanDisp2Info, nullptr);
+            VkDescriptorImageInfo inspectInfo[6];
+            for (uint32_t i = 0; i < 6; ++i) {
+                inspectInfo[i] = oceanFineInfo;
+                inspectInfo[i].imageView = i < 3 ? in.inspectHeight[i] : in.inspectDisplace[i - 3];
+                setw(81 + i, 82 + i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &inspectInfo[i], nullptr);
+            }
+            VkDescriptorImageInfo sunBgInfo = sampled(in.sunBackgroundView, in.sunBackgroundSampler);
+            setw(87, 88, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &sunBgInfo, nullptr);
             // Without ray query the layout has no binding 8: drop its write.
             uint32_t writeCount = static_cast<uint32_t>(w.size());
             if (!ctx_.rayQuerySupported()) {
@@ -1084,7 +1126,7 @@ namespace threepp::vulkan {
 
     void DeferredShade::declare(rg::RenderGraph& graph, rg::PassBuilder& pass, Stage stage, uint32_t frame,
                                 VkDescriptorSet particleIoSet) const {
-        const auto& refl = refl_[static_cast<int>(stage)];
+        const auto& refl = stage == Stage::Shade && inspectionEnabled ? inspectReflection_ : refl_[static_cast<int>(stage)];
         declareDescriptorSet(graph, pass, sets_[frame], 0, refl, rg::kCompute);
         if (stage == Stage::ParticleLight && particleIoSet != VK_NULL_HANDLE) {
             declareDescriptorSet(graph, pass, particleIoSet, 1, refl, rg::kCompute);
@@ -1097,7 +1139,7 @@ namespace threepp::vulkan {
     // app holds one pipeline per G-buffer sample count its views use.
     VkPipeline DeferredShade::shadePipeline(uint32_t flags, bool probeGi) {
         const uint64_t probeState = specProbe_ ? (probeGi ? 2u : 1u) : 0u;
-        const uint64_t key = static_cast<uint64_t>(flags & specMask_) | (probeState << 32u);
+        const uint64_t key = static_cast<uint64_t>(flags & specMask_) | (probeState << 32u) | (inspectionEnabled ? (1ull << 40u) : 0ull);
         for (const auto& [k, perm] : shadePerms_) {
             if (k == key) return perm;
         }
@@ -1107,16 +1149,19 @@ namespace threepp::vulkan {
     }
 
     VkPipeline DeferredShade::createShadePipeline(uint64_t key) {
-        const std::array<uint32_t, 3> values{static_cast<uint32_t>(key & 0xFFFFFFFFu), specMask_,
+        const auto& current=UniformCurrent::environment();
+        std::array<uint32_t, 5> values{static_cast<uint32_t>(key & 0xFFFFFFFFu), specMask_,
                                             static_cast<uint32_t>((key >> 32u) & 0xFFu)};
-        std::array<VkSpecializationMapEntry, 3> entries{};
+        std::memcpy(&values[3],&current.x,4); std::memcpy(&values[4],&current.z,4);
+        std::array<VkSpecializationMapEntry, 5> entries{};
         for (uint32_t i = 0; i < 3; ++i) {
             entries[i].constantID = i;// kSpecFlags, kSpecMask, kProbeGi
             entries[i].offset     = i * sizeof(uint32_t);
             entries[i].size       = sizeof(uint32_t);
         }
         VkSpecializationInfo si{};
-        si.mapEntryCount = static_cast<uint32_t>(entries.size());
+        entries[3]={19,12,4}; entries[4]={20,16,4};
+        si.mapEntryCount = current.enabled ? 5 : 3;
         si.pMapEntries   = entries.data();
         si.dataSize      = sizeof(values);
         si.pData         = values.data();
@@ -1126,6 +1171,18 @@ namespace threepp::vulkan {
         cpci.stage.sType               = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
         cpci.stage.stage               = VK_SHADER_STAGE_COMPUTE_BIT;
         cpci.stage.module              = shadeMod_;
+        if ((key & (1ull << 40u)) != 0) {
+            if (!inspectMod_) {
+                VkShaderModuleCreateInfo mi{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+                const char* local = std::getenv("THREEPP_SHADE_EXPERIMENT");
+                if (!ctx_.rayQuerySupported()) { mi.pCode = kDeferredShadeInspectNoRtCompSpv; mi.codeSize = sizeof(kDeferredShadeInspectNoRtCompSpv); }
+                else if (local && *local == '1') { mi.pCode = kDeferredShadeInspectLocalCompSpv; mi.codeSize = sizeof(kDeferredShadeInspectLocalCompSpv); }
+                else { mi.pCode = kDeferredShadeInspectCompSpv; mi.codeSize = sizeof(kDeferredShadeInspectCompSpv); }
+
+                check(vkCreateShaderModule(ctx_.device(), &mi, nullptr, &inspectMod_), "ocean inspector shader");
+            }
+            cpci.stage.module = inspectMod_;
+        }
         cpci.stage.pName               = "main";
         cpci.stage.pSpecializationInfo = &si;
         cpci.layout                    = pipeLayout_;
@@ -1191,13 +1248,153 @@ namespace threepp::vulkan {
                    | (std::min(p.cutoutRayCap, 15u) << 16u)// bits 16-19: cutout ray cap (0 = off)
                    | (std::min(static_cast<uint32_t>(std::max(p.cutoutRayCapFrom, 0.f) / 4.f + 0.5f), 255u)
                       << 20u);                       // bits 20-27: ...from this distance, in 4 m steps
+        // Offline diagnostic/local-GI override. The application owns enabling it;
+        // no flags change in an ordinary renderer session.
+        if (const char* v = std::getenv("THREEPP_LOCAL_GI"); v && *v == '1') push.flags |= 16384u;
+        if (const char* v = std::getenv("THREEPP_SKY_REFERENCE"); v && *v == '1') push.flags |= 32768u;
+        if (const char* v = std::getenv("THREEPP_GI_FACTORS"); v && *v == '1') push.flags |= (1u << 28u);
+        // bit 31: the air's in-scatter is the horizon sky in the ray's azimuth (Koschmieder airlight)
+        if (const char* v = std::getenv("THREEPP_FOG_HORIZON_INSCATTER"); v && *v == '1') push.flags |= (1u << 31u);
+        // bit 30: water mirrors geometry through the full wave slope (shadeWater's reflFullSlope)
+        if (const char* v = std::getenv("THREEPP_WATER_REFL_FULL_SLOPE"); v && *v == '1') push.flags |= (1u << 30u);
+        // bit 29: water or air decided per pixel from the drawn surface (deferred_shade.comp gNearSurfaceY)
+        if (const char* v = std::getenv("THREEPP_UNDERWATER_PIXEL"); v && *v == '1') push.flags |= (1u << 29u);
         vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, shadePipeline(push.flags, p.probeGi));
         push.frame             = p.frameCounter;
         push.emissiveCount      = p.emissiveCount;
         push.emissiveTotalPower = p.emissiveTotalPower;
         push.fireflyClamp       = p.fireflyClamp;
+        if (const char* v = std::getenv("KRV_PREVIEW"); v && *v == '1') push.oceanOptions |= 1u;
+        if (const char* v = std::getenv("KRV_REFL_PATH_VIS"); v && std::strcmp(v, "1") == 0) push.oceanOptions2 |= 1u;
+        if (const char* v = std::getenv("KRV_REFL_HORIZON_VIS"); v && std::strcmp(v, "1") == 0) push.oceanOptions2 |= 2u;
+        // the mirror lobe is the default; KRV_REFL_MIRROR_LOBE=0 restores the previous behaviour.
+        if (const char* v = std::getenv("KRV_REFL_MIRROR_LOBE"); !v || std::strcmp(v, "0") != 0) push.oceanOptions2 |= 32u;
+        // b12cam: lamps on water (oceanOptions2 bit 11): the column in-scatter through the forward HG lobe, no Lambert pool
+        if (const char* v = std::getenv("KRV_WATER_LAMPS"); v && std::strcmp(v, "1") == 0) push.oceanOptions2 |= 2048u;
+        // breakers in place (oceanOptions2 bit 13): the storm look's grouped sheet off, the field's breakers drawn
+        // speck fix: the mirror lobe's downward rays return the water body too, and the lobe eases to the macro normal on
+        // edge-on facets (oceanOptions2 bit 16, on by default; KRV_REFL_DOWN_FIX=0 rolls back)
+        if (const char* v = std::getenv("KRV_REFL_DOWN_FIX"); !v || std::strcmp(v, "0") != 0) push.oceanOptions2 |= 65536u;
+        // KRV_REFL_WATER_HIT (on by default; =0 rolls back): the water's own reflection ray that meets the sea ends there
+        // and returns that water's radiance, instead of passing through it (oceanOptions2 bit 21)
+        if (const char* v = std::getenv("KRV_REFL_WATER_HIT"); !(v && *v == '0')) push.oceanOptions2 |= 2097152u;
+        // KRV_REFL_LOBE_SLOPE (on by default; =0 rolls back): the mirror lobe is as wide as the slope the Fresnel and
+        // sky integral uses, banked + the material's remainder (oceanOptions2 bit 20)
+        if (const char* v = std::getenv("KRV_REFL_LOBE_SLOPE"); !(v && *v == '0')) push.oceanOptions2 |= 1048576u;
+        // KRV_FINE_NORMAL_AGREE (on by default; =0 rolls back): the fine normal is read where the mesh read the fine
+        // cascade's height, wherever the mesh carries it (oceanOptions2 bit 30)
+        if (const char* v = std::getenv("KRV_FINE_NORMAL_AGREE"); !(v && *v == '0')) push.oceanOptions2 |= 1073741824u;
+        // foam and aeration take out the water's mirror reflection instead of blending over it (oceanOptions2 bit 8)
+        if (const char* v = std::getenv("KRV_FOAM_KILLS_SPEC"); v && std::strcmp(v, "1") == 0) push.oceanOptions2 |= 256u;
+        if (const char* v = std::getenv("KRV_BREAKERS_INPLACE"); v && std::strcmp(v, "1") == 0) push.oceanOptions2 |= 8192u;
+        // where KRV_SLOPE_BUDGET=1 acts (a preset with the omega^-4 tail; the application then sets KRV_SB_REBASE=1) the
+        // live band's fold is re-based on the waves that break (oceanOptions2 bit 14)
+        if (const char* v = std::getenv("KRV_SB_REBASE"); v && std::strcmp(v, "1") == 0) push.oceanOptions2 |= 16384u;
+        // KRV_CAP_TRAIL=1, a cap as a thin white crest line with a grey broken trail behind it instead of a
+        // white patch (oceanOptions2 bit 19; storm look)
+        if (const char* v = std::getenv("KRV_CAP_TRAIL"); v && std::strcmp(v, "1") == 0) push.oceanOptions2 |= 524288u;
+        // KRV_WATER_BUBBLES=1 (or 2), bubble plume backscatter in the water body (oceanOptions2 bit 15).
+        // KRV_WATER_BUBBLES_BB=n scales the plumes' backscatter by n/16 for calibration (oceanOptions2 bits 24..29)
+        if (const char* v = std::getenv("KRV_WATER_BUBBLES"); v && (std::strcmp(v, "1") == 0 || std::strcmp(v, "2") == 0)) {
+            static const uint32_t bbN = [] { const char* b = std::getenv("KRV_WATER_BUBBLES_BB"); return b ? std::min(63u, unsigned(std::atoi(b))) : 16u; }();
+            push.oceanOptions2 |= KRV_OPT2_WATER_BUBBLES | (bbN << 24u);
+        }
+        if (const char* v = std::getenv("KRV_REFL_REFINE_NEAR"); v && *v == '1') push.oceanOptions |= 2u;
+        if (const char* v = std::getenv("KRV_REFL_SKIP_SEA"); v && *v == '1') push.oceanOptions |= 4u;
+        // Render-only ablations for the artifact evidence.
+        if (const char* v = std::getenv("KRV_DIAG_LEGACY_REFL_SAMPLER"); v && *v == '1') push.oceanOptions |= 8u;
+        if (const char* v = std::getenv("KRV_DIAG_NO_GEOMETRY_REFLECTION"); v && *v == '1') push.oceanOptions |= 16u;
+        if (const char* v = std::getenv("KRV_DIAG_NO_RESIDUE"); v && *v == '1') push.oceanOptions |= 32u;
+        if (const char* v = std::getenv("KRV_DIAG_NO_WAKE_FOAM"); v && *v == '1') push.oceanOptions |= 64u;
+        // default foam corrections. Explicit 0 retains the matched
+        // pre-fix shading for diagnostic captures; simulation is unaffected.
+        if (const char* v = std::getenv("KRV_DIAG_CAP_TEXTURE"); !v || *v != '0') push.oceanOptions |= 128u;
+        if (const char* v = std::getenv("KRV_DIAG_RESIDUE_OPACITY"); !v || *v != '0') push.oceanOptions |= 256u;
+        if (const char* v = std::getenv("KRV_DIAG_PRE37B_RESIDUE"); v && *v == '1') push.oceanOptions |= 512u;
+        if (const char* v = std::getenv("KRV_DIAG_PRE37B_WAKE"); v && *v == '1') push.oceanOptions |= 1024u;
+        if (const char* v = std::getenv("KRV_DIAG_INT3_FOAM_ALPHA"); v && *v == '1') push.oceanOptions |= 2048u;
+        if (const char* v = std::getenv("KRV_DIAG_CAP_EROSION"); !v || *v != '0') push.oceanOptions |= 4096u;
+        // gate natural breaking caps out of the hull-deformed
+        // surface; wake/contact foam retains its independent producer.
+        if (const char* v = std::getenv("KRV_HULL_BAND_FIX"); !v || std::strcmp(v, "0") != 0) push.oceanOptions |= 8388608u;
+        // the storm look, oceanOptions bit 31 (it shared bit 22 with build 8's 16-ray default)
+        if (const char* v = std::getenv("KRV_STORM_LOOK"); v && *v == '1') push.oceanOptions |= 2147483648u;
+        // fresh deposits are opt-in; the diagnostic always forces off.
+        const char* fresh = std::getenv("KRV_FRESH");
+        const char* noFresh = std::getenv("KRV_DIAG_NO_FRESH");
+        if (!fresh || std::strcmp(fresh, "1") != 0 || (noFresh && *noFresh == '1'))
+            push.oceanOptions |= 8192u;
+        // Bit 8192 belongs to freshness previously; keep the independent
+        // foam-composite diagnostic on its own unused bit 2097152.
+        // independent render-only ablations, all unset by default.
+        if (const char* v = std::getenv("KRV_DIAG_NO_FOAM_COMPOSITE"); v && *v == '1') push.oceanOptions |= 2097152u;
+        if (const char* v = std::getenv("KRV_DIAG_NO_WATER_BODY"); v && *v == '1') push.oceanOptions |= 16384u;
+        if (const char* v = std::getenv("KRV_DIAG_NO_WASH_AERATION"); v && *v == '1') push.oceanOptions |= 32768u;
+        if (const char* v = std::getenv("KRV_DIAG_NO_FOAM_SHADOW"); v && *v == '1') push.oceanOptions |= 65536u;
+        if (const char* v = std::getenv("KRV_DIAG_OPAQUE_FOAM"); v && *v == '1') push.oceanOptions |= 131072u;
+        if (const char* v = std::getenv("KRV_DIAG_REFL_64"); v && *v == '1') push.oceanOptions |= 262144u;
+        if (const char* v = std::getenv("KRV_DIAG_NO_TRANSMISSION_GEOMETRY"); v && *v == '1') push.oceanOptions |= 524288u;
+        // Geometry radiance must use the same unresolved slope measure as
+        // water Fresnel. Explicit 0 restores the earlier narrow disk for audits.
+        if (const char* v = std::getenv("KRV_DIAG_REFL_TOTAL_SLOPE"); !v || *v != '0') push.oceanOptions |= 1048576u;
+        // default to 16 rays; explicit 32 preserves the previous behaviour.
+        // Bit 2097152 remains the independent foam-composite diagnostic.
+        // The existing 64-ray diagnostic takes priority.
+        const char* reflectionSamples = std::getenv("KRV_DIAG_REFL_SAMPLES");
+        if (!reflectionSamples || std::string(reflectionSamples) != "32") push.oceanOptions |= 4194304u;
+        if (reflectionSamples && std::string(reflectionSamples) == "64") push.oceanOptions |= 262144u;
+        // masked16 + footprint-consistent by default. Keep the
+        // the previous default sample bit (22) and foam diagnostic (21) independent; optional
+        // reservoir selectors occupy bits 27..28, lobe selectors bits 24..26.
+        const char* estimatorEnv = std::getenv("KRV_REFL_ESTIMATOR");
+        const std::string estimator = estimatorEnv ? estimatorEnv : "masked16";
+        if (estimator == "resample4") push.oceanOptions |= 134217728u;
+        else if (estimator == "resample8") push.oceanOptions |= 268435456u;
+        else if (estimator == "resample2") push.oceanOptions |= 402653184u;
+        else if (estimator == "masked16") push.oceanOptions |= 4u | 4194304u;
+        else if (estimator == "16") push.oceanOptions |= 4194304u;
+        else if (estimator == "32") push.oceanOptions &= ~4194304u;
+        else if (estimator == "64") push.oceanOptions |= 262144u;
+        const char* lobeEnv = std::getenv("KRV_REFL_LOBE");
+        const std::string lobe = lobeEnv ? lobeEnv : "footprint-consistent";
+        if (lobe == "banked") push.oceanOptions |= 16777216u;
+        else if (lobe == "footprint") push.oceanOptions |= 33554432u;
+        else if (lobe == "footprint-consistent") {
+            push.oceanOptions |= 33554432u;
+            // Integrate optics over total variance, independently of the
+            // conditional geometry lobe. Explicit 0 restores the previous optics.
+            const char* totalOptics = std::getenv("KRV_WATER_OPTICAL_TOTAL");
+            if (totalOptics && *totalOptics == '0') push.oceanOptions |= 67108864u;
+        }
+        // Restore the established directional water body without disabling
+        // the earlier incoming sky visibility. Explicit rrs restores the previous default.
+        const char* bodyClosure = std::getenv("KRV_WATER_BODY_CLOSURE");
+        if (!bodyClosure || std::string(bodyClosure) != "rrs") push.oceanOptions |= 1073741824u;
+        // off/total (and unknown explicit values) retain the previous total lobe.
+        // KRV_FOAM_CARRY=1, foam carried by the water (the live band cut to short breaking events; their deposit drawn as caps).
+        // (bit 29: bit 23 is KRV_HULL_BAND_FIX)
+        if (const char* v = std::getenv("KRV_FOAM_CARRY"); v && *v == '1') push.oceanOptions |= 536870912u;
+        // KRV_FOAM_RESIDUE=1, stage B residue in place (oceanOptions2 bit 3); it rides on the carry machinery
+        if (const char* v = std::getenv("KRV_FOAM_RESIDUE"); v && *v == '1') { push.oceanOptions |= 536870912u; push.oceanOptions2 |= 8u; }
+        // footprint fade is default on; =0 restores the previous behaviour.
+        if (const char* v = std::getenv("KRV_BAND_FOOTPRINT_FADE"); !v || std::strcmp(v, "0") != 0)
+            push.oceanOptions2 |= KRV_OPT2_BAND_FOOTPRINT_FADE;
+        // KRV_RESIDUE_FILAMENTS, no spume veil on the residue-off path (the veil drew its aged field as combed slabs).
+        // default on (=0 rolls back), only under the storm look (oceanOptions bit 31), and no longer the filament
+        // residue lines, which drew pale sheets over aged foam (see foamLayer).
+        if (const char* v = std::getenv("KRV_RESIDUE_FILAMENTS"); (!v || *v != '0') && (push.oceanOptions & 2147483648u) != 0u)
+            push.oceanOptions2 |= KRV_OPT2_RESIDUE_FILAMENTS;
+        push.inspectMode = p.inspectMode;
+        push.inspectSolo = p.inspectSolo;
+        push.inspectAddress = p.inspectAddress;
         push.oceanFineTileSize  = p.oceanFineTileSize;
         push.oceanFoamTileSize  = p.oceanFoamTileSize;
+        push.oceanSkirtX        = p.oceanSkirt[0];
+        push.oceanSkirtZ        = p.oceanSkirt[1];
+        push.oceanSkirtD0       = p.oceanSkirt[2];
+        push.oceanSkirtD1       = p.oceanSkirt[3];
+        push.oceanSkirtMss      = p.oceanSkirt[4];
+        push.rainRate           = p.rainRate;
         push.volDensity         = p.volDensity;
         push.volAniso           = p.volAniso;
         push.starIntensity      = p.starIntensity;
@@ -1305,8 +1502,8 @@ namespace threepp::vulkan {
         vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE,
                                 pipeLayout_, 0, 1, &sets_[frame], 0, nullptr);
         vkCmdPushConstants(cb, pipeLayout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
-        // One thread per texel of the fixed 512² map (local 8×8).
-        vkCmdDispatch(cb, 512u / 8u, 512u / 8u, 1);
+        // One thread per texel of the fixed 512x1024 image (local 8×8).
+        vkCmdDispatch(cb, 512u / 8u, 1024u / 8u, 1);// the near and the far map, stacked (cloud_map.glsl)
     }
 
     void DeferredShade::recordRtao(VkCommandBuffer cb, uint32_t frame,
@@ -1418,7 +1615,7 @@ namespace threepp::vulkan {
             passes[p].step     = 1u << p;
             passes[p].srcMode  = (p == 0) ? 0u : ((p & 1) ? 1u : 2u);
             passes[p].dstMode  = (p == passCount - 1) ? 2u : ((p & 1) ? 1u : 0u);
-            passes[p].feedback = (p == 1) ? 1u : 0u;
+            passes[p].feedback = (p == 1 && historyFeedback) ? 1u : 0u;
         }
         VkMemoryBarrier mb{};
         mb.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;

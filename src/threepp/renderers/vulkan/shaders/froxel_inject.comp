@@ -78,19 +78,13 @@ layout(set = 0, binding = 58, scalar) uniform CloudUbo {
     float hfFalloff;
     float hfNoiseAmount;
     float shadowActive;
+    float epoch;
+    float hfFloor;      // the air medium's uniform background haze under the layer
 } clouds;
+#define AIR_FLOOR
 
 layout(set = 0, binding = 65) uniform sampler2D cloudShadowTex;// top-down cloud transmittance
-// Cloud shadow transmittance at a world point — KEEP IN SYNC with
-// deferred_shade_10_lighting_utils.glsl / cloud_shadow.comp.
-float cloudShadowSample(vec3 worldPos) {
-    if (clouds.shadowActive < 0.5) return 1.0;
-    const float halfExt = 4000.0;
-    const vec2  cenXZ   = cam.viewInverse[3].xz;
-    const vec2  suv     = (worldPos.xz - cenXZ) / (2.0 * halfExt) + 0.5;
-    if (any(lessThan(suv, vec2(0.0))) || any(greaterThan(suv, vec2(1.0)))) return 1.0;
-    return texture(cloudShadowTex, suv).r;
-}
+#include "cloud_map.glsl"// cloudShadowSample, the near/far cloud maps
 
 // Shared ShadePush block (vulkan_shared.h) — this pass reads only the
 // fields it names; the host zero-fills the rest.

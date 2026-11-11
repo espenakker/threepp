@@ -12,6 +12,13 @@
 #ifndef THREEPP_VULKAN_SHARED_H
 #define THREEPP_VULKAN_SHARED_H
 
+// oceanOptions2 bit 10, default on; shared by host and shader.
+#define KRV_OPT2_BAND_FOOTPRINT_FADE 1024u
+// oceanOptions2 bit 7: KRV_RESIDUE_FILAMENTS .
+#define KRV_OPT2_RESIDUE_FILAMENTS 128u
+// oceanOptions2 bit 15: KRV_WATER_BUBBLES (opt-in).
+#define KRV_OPT2_WATER_BUBBLES 32768u
+
 // Bindless material-texture array size. Must match descriptor pool size and
 // `albedoMaps[kMaxMaterialTextures]` in every shader. Bumping requires a
 // clean rebuild so every translation unit picks up the new size.
@@ -59,6 +66,12 @@
 #define kRayMaskNoShadow   0x04u
 #define kRayMaskSensorOnly 0x08u
 #define kRayMaskAll        0x07u
+// opaque instances also carry one of two group bits, so a ray can leave the sea out: every existing ray mask
+// (0x01, kRayMaskAll) still meets the same instances. The water's own reflection rays skip the sea anyway (they used to
+// meet it and step past each crest, gTraceSkipWater), and that traversal of the ocean's BLAS was most of their cost.
+#define kRayMaskSea        0x10u   // the displaced ocean, with kRayMaskOpaque
+#define kRayMaskLand       0x20u   // every other opaque instance, with kRayMaskOpaque
+#define kRayMaskAllButSea  (kRayMaskLand | kRayMaskAlpha | kRayMaskNoShadow)
 
 // Per-instance flag word — packed host-side (VulkanCoreIndirect.cpp) into
 // DrawInfo.flags, carried through gbuffer.vert into the gbuffer IDs
@@ -109,6 +122,7 @@
 #ifdef __cplusplus
 
 #include <cstdint>
+#include <cstddef>
 
 namespace threepp::vulkan_pt {
 
@@ -208,7 +222,7 @@ namespace threepp::vulkan_pt {
         // NOT scaled — this is an IBL knob, not an exposure. 1.0 = unscaled,
         // which is what every material that never sets it carries.
         float envMapIntensity;
-        float _padTerrain;
+        float oceanPeakWavelength; // m; DisplacedMesh spectrum metadata, 0 = unavailable
         int32_t terrainBandAlbedoTex[4]; // -1 = band inert
         int32_t terrainBandNormalTex[4]; // -1 = no relief for that band
         float terrainBandRepeat[4];      // repeats per world metre
@@ -290,7 +304,7 @@ struct MaterialDesc {
     float terrainRoughStrength; // 0..1 band roughness modulation
     float terrainHeightBlend;   // height-blend sharpness (0 = linear)
     float envMapIntensity;      // IBL scale for this material as PRIMARY surface; 1 = unscaled
-    float _padTerrain;
+    float oceanPeakWavelength;
     ivec4 terrainBandAlbedoTex; // per-band overlay (A = height); -1 = inert
     ivec4 terrainBandNormalTex; // per-band normal/roughness; -1 = none
     vec4  terrainBandRepeat;    // repeats per world metre
@@ -348,10 +362,22 @@ namespace threepp::vulkan {
         uint32_t clusterLightCount;// # lights in the cluster buffer (0 = none)
         uint32_t shadeMode;        // 0 = dispatch A; 1 = MSAA per-sample dispatch B
         uint32_t preExpBits;       // float-bits pre-exposure baked into sceneHdr stores
+        float oceanSkirtX;         // the ocean skirt (DisplacedMesh::Skirt): centre XZ,
+        float oceanSkirtZ;
+        float oceanSkirtD0;        // the Chebyshev distances its displacement fades over
+        float oceanSkirtD1;        // (0, 0 = no skirt)
+        float oceanSkirtMss;       // the long waves' mean square slope, banked as it fades
+        float rainRate;            // rain on the water (mm/h; 0 = none)
+        uint32_t oceanOptions; // opt-ins, separate from the full flags word
+        uint32_t inspectMode, inspectSolo;
+        uint32_t oceanOptions2; // offset 116; bit 0 = KRV_REFL_PATH_VIS, bit 1 = KRV_REFL_HORIZON_VIS
+        uint64_t inspectAddress;
     };
-    static_assert(sizeof(ShadePush) == 80,
+    static_assert(offsetof(ShadePush, inspectMode) == 108 && offsetof(ShadePush, inspectAddress) == 120);
+    static_assert(offsetof(ShadePush, oceanOptions2) == 116);
+    static_assert(sizeof(ShadePush) == 128,
                   "ShadePush size changed - update the GLSL mirror in this file "
-                  "and the 80-byte push range in DeferredShade::createPipeline.");
+                  "and the push range in DeferredShade::createPipeline.");
 }
 
 #else  // GLSL
@@ -377,6 +403,18 @@ struct ShadePush {
     uint  clusterLightCount;
     uint  shadeMode;
     uint  preExpBits;
+    float oceanSkirtX;
+    float oceanSkirtZ;
+    float oceanSkirtD0;
+    float oceanSkirtD1;
+    float oceanSkirtMss;
+    float rainRate;
+    uint oceanOptions;
+    uint inspectMode, inspectSolo;
+    uint oceanOptions2;
+#ifdef KRV_OCEAN_INSPECT
+    uint64_t inspectAddress;
+#endif
 };
 // Every consumer declares:
 //   layout(push_constant) uniform Pc { ShadePush pc; };
