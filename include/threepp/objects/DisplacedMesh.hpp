@@ -431,6 +431,27 @@ namespace threepp {
         };
         mutable CascadeField heightFields[3];
 
+        // A cascade's spatial fields supplied by the host instead of its FFT chain
+        // (e.g. a sea made of given wave components that a vessel's motion is also
+        // driven by). When `dim` equals the cascade's texture size and both vectors
+        // hold dim*dim RG pairs, the renderer uploads them each frame in place of
+        // the cascade's Phillips / dynamic-spectrum / IFFT output, in the same
+        // convention the IFFT leaves: row-major cell (ix, iz) at index
+        // (iz*dim + ix)*2, texel (ix, iz) over world XZ (ix, iz) * tileSize / dim
+        // (cascade 1 in its rotated domain), values UNNORMALIZED (the shader divides
+        // by the cascade's tileSize, then scales the
+        // height by waveScale and the displacement by choppiness). `height` R is
+        // the vertical displacement (G unused); `disp` RG the horizontal (x, z).
+        // Everything that reads the cascade (displacement, normals, foam, the
+        // traced surface, sampleHeight's mirror) then sees the supplied field.
+        // dim = 0 (the default): the FFT chain runs as before.
+        struct ExternalField {
+            std::vector<float> height;
+            std::vector<float> disp;
+            uint32_t dim = 0;
+        };
+        ExternalField externalCascades[3];
+
         // Combined wave height of the rendered surface over (worldX, worldZ).
         // Mirrors water_displace.comp's sampleDisplacement(): cascades 0 and 1
         // are B-spline filtered, cascade 2 bilinear, and each contributes

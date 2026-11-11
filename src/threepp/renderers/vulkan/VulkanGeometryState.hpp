@@ -455,6 +455,7 @@ namespace threepp::vulkan::impl {
             std::unique_ptr<water::DynamicSpectrum>  dyn;
             std::unique_ptr<water::IFFT>             ifft;
             bool  phillipsRecorded = false;
+            bool  extUploaded = false;   // DisplacedMesh::externalCascades[i] written at least once (its images then GENERAL)
             float tileSize = 0.f;            // 0 = cascade not in use
         };
         std::array<Cascade, 3> cascades;
@@ -496,6 +497,10 @@ namespace threepp::vulkan::impl {
         // (sampleHeight()'s sticky opt-in), so scenes that never query
         // wave height pay no memory for it; null handles until then.
         Buffer    heightReadback[3][kFramesInFlight] = {};
+        // Host-visible staging for DisplacedMesh::externalCascades (height then
+        // displacement, dim²·16 bytes), one per frame in flight; allocated on
+        // first use.
+        Buffer    externalStaging[3][kFramesInFlight] = {};
         // Per-cascade readback texture dimension. Cascades can run at
         // different FFT resolutions — each cascade's readback buffer is
         // sized to its own dim²·16 bytes: the height image (RG32F) at

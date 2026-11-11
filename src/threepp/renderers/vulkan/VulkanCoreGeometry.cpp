@@ -2741,6 +2741,63 @@ void VulkanRenderer::Impl::recordDisplacedUpdate(VkCommandBuffer cb, DisplacedMe
             for (uint32_t i = 0; i < 3; ++i) {
                 if (!(st.cascadeMask & (1u << i))) continue;
                 auto& c = st.cascades[i];
+                const auto& ext = dm.externalCascades[i];
+                const uint32_t extDim = st.heightReadbackDim[i];
+                const bool external = ext.dim != 0 && ext.dim == extDim &&
+                                      ext.height.size() == size_t(extDim) * extDim * 2 &&
+                                      ext.disp.size() == size_t(extDim) * extDim * 2;
+                if (external) {
+                    // The host's field in place of the chain: staging buffer of
+                    // this frame in flight -> the cascade's ht / displacement images.
+                    const VkDeviceSize fieldBytes = VkDeviceSize(extDim) * extDim * 8u;
+                    auto& sb = st.externalStaging[i][currentFrame];
+                    if (sb.handle == VK_NULL_HANDLE) {
+                        sb = createBuffer(ctx->allocator(), ctx->device(), 2 * fieldBytes,
+                                          VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_AUTO,
+                                          VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+                                                  VMA_ALLOCATION_CREATE_MAPPED_BIT);
+                        ctx->setObjectName(sb.handle, (std::string("ocean.externalCascade") + std::to_string(i)).c_str());
+                    }
+                    void* mapped = nullptr;
+                    check(vmaMapMemory(ctx->allocator(), sb.alloc, &mapped), "vmaMapMemory(external cascade)");
+                    std::memcpy(mapped, ext.height.data(), fieldBytes);
+                    std::memcpy(static_cast<char*>(mapped) + fieldBytes, ext.disp.data(), fieldBytes);
+                    vmaUnmapMemory(ctx->allocator(), sb.alloc);
+                    vmaFlushAllocation(ctx->allocator(), sb.alloc, 0, 2 * fieldBytes);
+                    const VkImage dst[2] = {c.dyn->ht().image, c.dyn->displacement().image};
+                    VkImageMemoryBarrier imb[2]{};
+                    for (int k = 0; k < 2; ++k) {
+                        imb[k].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                        imb[k].srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+                        imb[k].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                        imb[k].oldLayout = c.extUploaded ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_UNDEFINED;
+                        imb[k].newLayout = VK_IMAGE_LAYOUT_GENERAL;
+                        imb[k].image = dst[k];
+                        imb[k].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+                        imb[k].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                        imb[k].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                    }
+                    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                         0, 0, nullptr, 0, nullptr, 2, imb);
+                    for (int k = 0; k < 2; ++k) {
+                        VkBufferImageCopy bic{};
+                        bic.bufferOffset = VkDeviceSize(k) * fieldBytes;
+                        bic.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+                        bic.imageExtent = {extDim, extDim, 1};
+                        vkCmdCopyBufferToImage(cb, sb.handle, dst[k], VK_IMAGE_LAYOUT_GENERAL, 1, &bic);
+                    }
+                    for (int k = 0; k < 2; ++k) {
+                        imb[k].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                        imb[k].dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT;
+                        imb[k].oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+                    }
+                    // the readback barrier below waits on COMPUTE: make the copy visible there too
+                    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT |
+                                                 VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                                         0, 0, nullptr, 0, nullptr, 2, imb);
+                    c.extUploaded = true;
+                } else {
                 if (!c.phillipsRecorded) {
                     c.phillips->recordCompute(cb);
                     c.phillipsRecorded = true;
@@ -2758,6 +2815,7 @@ void VulkanRenderer::Impl::recordDisplacedUpdate(VkCommandBuffer cb, DisplacedMe
                 // the first FFT chain).
                 c.ifft->recordApply(cb, ht,  st.scratchA);
                 c.ifft->recordApply(cb, dsp, st.scratchA);
+                }
 
                 // Copy the spatial-domain height image into THIS FRAME's slot
                 // of the host-mapped readback ring for this cascade (slot =
