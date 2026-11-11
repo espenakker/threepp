@@ -851,6 +851,7 @@ if (THREEPP_WITH_VULKAN)
             "threepp/renderers/vulkan/LidarScanner.hpp"
             "threepp/renderers/vulkan/EnvPrefilter.hpp"
             "threepp/renderers/vulkan/EventCameraDetector.hpp"
+            "threepp/renderers/vulkan/SensorChain.hpp"
             "threepp/renderers/vulkan/SkinningPipeline.hpp"
             "threepp/renderers/vulkan/TetSkinningPipeline.hpp"
             "threepp/renderers/vulkan/GpuTimings.hpp"
@@ -901,6 +902,7 @@ if (THREEPP_WITH_VULKAN)
             "threepp/renderers/vulkan/LidarScanner.cpp"
             "threepp/renderers/vulkan/EnvPrefilter.cpp"
             "threepp/renderers/vulkan/EventCameraDetector.cpp"
+            "threepp/renderers/vulkan/SensorChain.cpp"
             "threepp/renderers/vulkan/SkinningPipeline.cpp"
             "threepp/renderers/vulkan/TetSkinningPipeline.cpp"
             "threepp/renderers/vulkan/GpuTimings.cpp"
@@ -1192,6 +1194,16 @@ if (THREEPP_WITH_VULKAN)
         "${CMAKE_CURRENT_SOURCE_DIR}/threepp/renderers/vulkan/shaders/event_detect.comp"
         kEventDetectCompSpv
         _event_detect_spv_h)
+    # A camera's image chain on a sensor view (SensorChain): the colour
+    # camera's lens, blur and sensor, and the event camera's pixels.
+    compile_vulkan_shader(threepp
+        "${CMAKE_CURRENT_SOURCE_DIR}/threepp/renderers/vulkan/shaders/sensor_rgb.comp"
+        kSensorRgbCompSpv
+        _sensor_rgb_spv_h)
+    compile_vulkan_shader(threepp
+        "${CMAKE_CURRENT_SOURCE_DIR}/threepp/renderers/vulkan/shaders/sensor_evs.comp"
+        kSensorEvsCompSpv
+        _sensor_evs_spv_h)
     # Fast deterministic shading for the event-camera pipeline. Reads the
     # raster G-buffer + material/light buffers, outputs a packed BGRA8
     # luma buffer matching the swapchain layout — feeds event_detect

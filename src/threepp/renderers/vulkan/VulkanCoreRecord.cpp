@@ -3342,6 +3342,13 @@ void VulkanRenderer::Impl::addPrimaryViewPasses(rg::RenderGraph& g, uint32_t ima
             // prepass).
             addHeadPasses(g);
             addDeformAndTlasPasses(g);
+            // A sensor frame (renderSensorViews): the world-space work every
+            // view shares, and the probe-GI update the primary's shade would
+            // have run; no primary G-buffer, shade, post or swapchain.
+            if (frameIsSensor_) {
+                addSceneDispatchPasses(g, DispatchPart::ProbeOnly);
+                return;
+            }
             if (asyncFrame_) {
                 // The async-compute pilot: the shade's G-buffer-free inputs go
                 // to computeGraph_ (it already holds the ocean BLAS rebuild and

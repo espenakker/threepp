@@ -130,6 +130,14 @@ namespace threepp::vulkan {
         // for what replaces the acquire/present cycle when it is on.
         bool presentSuppressed() const { return presentSuppressed_; }
 
+        // True when there is no swapchain at all: a headless surface that offers
+        // no surface formats (NVIDIA's VK_EXT_headless_surface reports none), or
+        // THREEPP_VULKAN_OFFSCREEN=1. The "swapchain images" are then plain
+        // device images of the swapchain's format and usage, owned here; the
+        // frame loop pins one per in-flight slot and never acquires or presents
+        // (presentSuppressed() is true as well).
+        bool offscreen() const { return offscreen_; }
+
         // VK_KHR_ray_query plus acceleration structures: inline rays from
         // compute for shadows, GI, reflections, refraction and fog. False on a
         // device without them (or with THREEPP_VULKAN_NO_RT=1); the renderer
@@ -257,6 +265,9 @@ namespace threepp::vulkan {
         bool vsync_ = true;// FIFO when true, else MAILBOX/IMMEDIATE (see createSwapchain)
         bool headlessSurface_ = false;// VK_EXT_headless_surface instead of a window surface
         bool presentSuppressed_ = false;// opt-in headless mode: acquire once per slot, never present
+        bool offscreen_ = false;// no swapchain: offscreenImages_ stand in for its images
+        std::vector<VkImage>         offscreenImages_;
+        std::vector<VmaAllocation>   offscreenAllocs_;
         bool rayTracingEnabled_ = false;
         bool rayQuerySupported_ = false;
         bool externalMemorySupported_ = false;
@@ -285,6 +296,7 @@ namespace threepp::vulkan {
         void createPipelineCache();
         void savePipelineCache();
         void createSwapchain();
+        void createOffscreenImages(VkExtent2D extent);
         void createSwapchainImageViews();
         void destroySwapchainResources();
     };

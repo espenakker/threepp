@@ -1411,6 +1411,26 @@ namespace threepp::vulkan {
         std::vector<VkSurfaceFormatKHR> formats(fmtN);
         vkGetPhysicalDeviceSurfaceFormatsKHR(physicalDevice_, surface_, &fmtN, formats.data());
 
+        // No presentable surface: a headless surface that offers no formats
+        // (NVIDIA's), or an explicit opt-in. Nothing is ever shown, so the
+        // frame loop gets device images of the swapchain's format instead.
+        const char* offEnv = std::getenv("THREEPP_VULKAN_OFFSCREEN");
+        const bool forceOffscreen = offEnv && *offEnv && *offEnv != '0';
+        if (headlessSurface_ && (fmtN == 0 || forceOffscreen)) {
+            int w = 0, h = 0;
+            glfwGetFramebufferSize(window_, &w, &h);
+            if (w <= 0 || h <= 0) glfwGetWindowSize(window_, &w, &h);
+            const VkExtent2D ext{static_cast<uint32_t>(std::max(w, 1)), static_cast<uint32_t>(std::max(h, 1))};
+            if (!offscreen_) {
+                std::cerr << "[VulkanContext] offscreen: no swapchain (" << fmtN
+                          << " surface formats); " << ext.width << "x" << ext.height << " device images\n";
+            }
+            offscreen_ = true;
+            presentSuppressed_ = true;
+            createOffscreenImages(ext);
+            return;
+        }
+
         VkSurfaceFormatKHR chosenFmt = formats[0];
         for (const auto& f : formats) {
             if (f.format == VK_FORMAT_B8G8R8A8_UNORM &&
@@ -1529,6 +1549,39 @@ namespace threepp::vulkan {
         vkGetSwapchainImagesKHR(device_, swapchain_, &imN, swapchainImages_.data());
     }
 
+    void VulkanContext::createOffscreenImages(VkExtent2D extent) {
+        // The swapchain's format, usage and count (minImageCount + frames in
+        // flight under suppressed presents), so every path that writes or
+        // reads "the swapchain image" works on these unchanged. GENERAL is
+        // reached by the frame's own UNDEFINED -> GENERAL transition.
+        const uint32_t n = 1u + impl::kFramesInFlight;
+        offscreenImages_.assign(n, VK_NULL_HANDLE);
+        offscreenAllocs_.assign(n, VK_NULL_HANDLE);
+        for (uint32_t i = 0; i < n; ++i) {
+            VkImageCreateInfo ici{};
+            ici.sType       = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+            ici.imageType   = VK_IMAGE_TYPE_2D;
+            ici.format      = VK_FORMAT_B8G8R8A8_UNORM;
+            ici.extent      = {extent.width, extent.height, 1};
+            ici.mipLevels   = 1;
+            ici.arrayLayers = 1;
+            ici.samples     = VK_SAMPLE_COUNT_1_BIT;
+            ici.tiling      = VK_IMAGE_TILING_OPTIMAL;
+            ici.usage       = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_STORAGE_BIT |
+                        VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+            ici.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
+            ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            VmaAllocationCreateInfo aci{};
+            aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+            check(vmaCreateImage(allocator_, &ici, &aci, &offscreenImages_[i], &offscreenAllocs_[i], nullptr),
+                  "vmaCreateImage(offscreen)");
+        }
+        swapchainTransferSrc_ = true;
+        swapchainFormat_      = VK_FORMAT_B8G8R8A8_UNORM;
+        swapchainExtent_      = extent;
+        swapchainImages_      = offscreenImages_;
+    }
+
     void VulkanContext::createSwapchainImageViews() {
         swapchainImageViews_.resize(swapchainImages_.size());
         for (size_t i = 0; i < swapchainImages_.size(); ++i) {
@@ -1557,6 +1610,10 @@ namespace threepp::vulkan {
             vkDestroySwapchainKHR(device_, swapchain_, nullptr);
             swapchain_ = VK_NULL_HANDLE;
         }
+        for (size_t i = 0; i < offscreenImages_.size(); ++i)
+            vmaDestroyImage(allocator_, offscreenImages_[i], offscreenAllocs_[i]);
+        offscreenImages_.clear();
+        offscreenAllocs_.clear();
         swapchainImages_.clear();
     }
 

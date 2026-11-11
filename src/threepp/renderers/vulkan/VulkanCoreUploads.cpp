@@ -1218,12 +1218,22 @@ namespace threepp {
         // cell). Zero-power lights get cullRadius 0 → in no cell.
         std::vector<GpuClusterLight> clusterCollect;
         clusterCollect.reserve(16);
-        const auto clusterCullRadius = [](const GpuClusterLight& r) {
+        // An unbounded light (range 0) reaches as far as its falloff stays
+        // visible. "Visible" is in the displayed picture, so the cut-off
+        // radiance is divided by the frame's exposure: a work light seen at a
+        // night exposure (x40-150) is still bright where an absolute 0.005
+        // had already culled it (a 20 klm flood stopped at 6.5 m, the landing
+        // it lights at 9 m got nothing). 1e-4 displayed is under one 8-bit
+        // step of sRGB, so the cell boundary leaves no visible edge.
+        // THREEPP_VK_LIGHT_CULL_ABS=1: the absolute 0.005 as before (a check)
+        static const bool cullAbs = [] { const char* e = std::getenv("THREEPP_VK_LIGHT_CULL_ABS"); return e && *e == '1'; }();
+        const float cullRadiance = cullAbs ? 0.005f : 1e-4f / std::max(currentExposure(), 1e-3f);
+        const auto clusterCullRadius = [cullRadiance](const GpuClusterLight& r) {
             if (r.range > 0.f) return r.range;
             const float L = std::max({r.color[0], r.color[1], r.color[2]});
             if (L <= 0.f) return 0.f;
             const float d = std::max(r.decay, 0.25f);
-            return std::min(std::pow(L / 0.005f, 1.f / d), 500.f);
+            return std::min(std::pow(L / cullRadiance, 1.f / d), 500.f);
         };
 
         // Physical light units (setPhysicalLightUnits): point/spot

@@ -81,7 +81,12 @@ namespace threepp {
             // the primary (addPrimaryViewPasses returns after the G-buffer), so
             // on those frames the grid is not updated and a secondary view
             // shades against the one the last full frame left.
-            if (probeGIEnabled_ && !view().secondary) {
+            // A sensor frame at the instant of the last update (sub-renders between two ticks hold the
+            // scene) leaves the grid as that update left it.
+            const double probeNow = frameNowSec();
+            const bool probeRepeat = frameIsSensor_ && probeLastT_ == probeNow;
+            probeLastT_ = probeNow;
+            if (probeGIEnabled_ && !view().secondary && !probeRepeat) {
                 if (probeGridDirty_) {
                     fitProbeGridToScene();
                     probeGridDirty_ = false;
@@ -107,6 +112,13 @@ namespace threepp {
                 probeGI_->declare(g, pass, f);
             }
         }
+        if (part == DispatchPart::ProbeOnly) return;
+        // A sensor-mode view (setViewSensorMode) shades with a held seed, so the
+        // stochastic terms put the same pattern on a static scene every frame.
+        const uint32_t shadeSeed = view().sensorMode ? 1u : sampleIndex;
+        // ...and may shade without the SVGF denoise (setViewSensorShading): with no history it is a spatial blur
+        // of a held pattern, a third of a sensor frame's GPU time
+        const bool viewDenoise = denoiseEnabled_ && !(view().sensorMode && !view().sensorDenoise);
         // The sample count THIS view's G-buffer was rastered at, not the
         // renderer-wide setting. A secondary view gets no MS framebuffer
         // (createRasterGbufImages gates it) and rasters through the 1x pass,
@@ -215,7 +227,7 @@ namespace threepp {
             auto pass = g.addPass("rtao", [this, f](VkCommandBuffer c) {
                 gpuTimings_->begin(c, TP_Rtao, f);
                 view().deferredShade_->recordRtao(c, f, regionRenderExt_.width, regionRenderExt_.height,
-                                                  sampleIndex);
+                                                  view().sensorMode ? 1u : sampleIndex);
                 gpuTimings_->end(c, TP_Rtao, f);
             });
             shade.declare(g, pass, Stage::Rtao, f);
@@ -226,14 +238,14 @@ namespace threepp {
         shadeParams.envMipCount        = envImage.mipLevels;
         shadeParams.shadows            = true;
         shadeParams.ao                 = rtaoOn;
-        shadeParams.frameCounter       = sampleIndex;
+        shadeParams.frameCounter       = shadeSeed;
         shadeParams.emissiveCount      = emissiveTriCountThisFrame_;
         shadeParams.emissiveTotalPower = emissiveTotalPowerThisFrame_;
         shadeParams.fireflyClamp       = fireflyClamp_;
         shadeParams.oceanFineTileSize  = oceanFineTileSize;
         shadeParams.oceanFoamTileSize  = oceanFoamTileSize;
-        shadeParams.denoise            = denoiseEnabled_;
-        shadeParams.restirDI           = restirDIEnabled_;
+        shadeParams.denoise            = viewDenoise;
+        shadeParams.restirDI           = restirDIEnabled_ && !view().sensorMode;
         shadeParams.volFog             = deferredVolFog_;
         shadeParams.volDensity         = deferredVolDensity_;
         shadeParams.volAniso           = deferredVolAniso_;
@@ -300,7 +312,7 @@ namespace threepp {
         // reflection gloss reconstruction) and composite them into sceneHdr:
         // the filter reads the indirect 5×5 neighbourhood and read-modify-
         // writes sceneHdr.
-        if (denoiseEnabled_) {
+        if (viewDenoise) {
             const uint32_t lightingView = view().secondary ? 0u : lightingView_;
             auto pass = g.addPass("denoise", [this, f, viewMsaaSamples, shadeBActive, lightingView](VkCommandBuffer c) {
                 gpuTimings_->begin(c, TP_Denoise, f);// denoiseMs = deferred SVGF (4 GI passes + reflection pass)
@@ -512,6 +524,14 @@ namespace threepp {
             // block and must keep extending the open frame, not end it.
             if (core()->frameState_ != Impl::FrameState::Idle) core()->endFrame();
             const auto sceneStart = std::chrono::high_resolution_clock::now();
+            // A sensor frame at the instant the scene was last built for (sub-renders between two
+            // ticks hold the scene; only their cameras move) renders the scene as built: its
+            // snapshot, BLAS/TLAS inputs and draw lists stand. setSensorSceneHold(false) rebuilds.
+            const double nowT = core()->frameNowSec();
+            const bool hold = core()->sensorFrame_ && core()->sensorSceneHold_ && core()->sceneBuiltT_ == nowT &&
+                              core()->sceneBuiltRoot_ == &scene;
+            core()->sceneBuiltT_ = nowT, core()->sceneBuiltRoot_ = &scene;
+            if (!hold) {
             core()->ensureSceneBuilt(scene, camera);
             // World-space Sprites (screenSpace == false) are drawn by the overlay
             // billboard pass, not the deferred/G-buffer path. Snapshot them each frame
@@ -525,6 +545,7 @@ namespace threepp {
             // still holds a Camera&, so the pass's camera parameters and the
             // per-cloud depth percentiles are stashed here.
             core()->collectSplatClouds(scene, camera);
+            }
             core()->pendingCpuEnsureSceneMs_ =
                     std::chrono::duration<float, std::milli>(
                             std::chrono::high_resolution_clock::now() - sceneStart)
@@ -2907,6 +2928,117 @@ namespace threepp {
         auto* v = core()->findView(handle);
         if (!v) return false;
         v->taaEnabled = enabled;
+        return true;
+    }
+
+    void VulkanRenderer::waitSensorFrames() {
+        auto* c = core();
+        vkWaitForFences(c->ctx->device(), kFramesInFlight, c->inFlight.data(), VK_TRUE, UINT64_MAX);
+    }
+
+    void VulkanRenderer::renderSensorViews(Object3D& scene, Camera& camera, bool wait) {
+        auto* c = core();
+        if (c->frameState_ != Impl::FrameState::Idle) c->endFrame();
+        c->sensorFrame_ = true;
+        try {
+            render(scene, camera);
+            c->endFrame();
+        } catch (...) {
+            c->sensorFrame_ = false;
+            throw;
+        }
+        c->sensorFrame_ = false;
+        if (!wait) return;
+        // endFrame advanced the slot; the frame just submitted is the previous one
+        const uint32_t done = (c->currentFrame + kFramesInFlight - 1u) % kFramesInFlight;
+        vkWaitForFences(c->ctx->device(), 1, &c->inFlight[done], VK_TRUE, UINT64_MAX);
+    }
+
+    void VulkanRenderer::setSensorSceneHold(bool hold) { core()->sensorSceneHold_ = hold; }
+
+    bool VulkanRenderer::setViewEnabled(uint32_t handle, bool enabled) {
+        auto* v = core()->findView(handle);
+        if (!v || !v->secondary) return false;
+        v->enabled = enabled;
+        return true;
+    }
+
+    bool VulkanRenderer::setViewSensorMode(uint32_t handle, bool enabled) {
+        auto* v = core()->findView(handle);
+        if (!v || !v->secondary) return false;
+        v->sensorMode = enabled;
+        v->taaEnabled = !enabled;
+        if (v->taa_) v->taa_->invalidateHistory();
+        return true;
+    }
+
+    bool VulkanRenderer::setViewSensorChain(uint32_t handle, const SensorChainSetup& setup) {
+        auto* v = core()->findView(handle);
+        if (!v || !v->secondary) return false;
+        vulkan::SensorChain::Setup s;
+        s.kind = setup.events ? vulkan::SensorChain::Kind::Events : vulkan::SensorChain::Kind::Rgb;
+        s.baseW = setup.baseW, s.baseH = setup.baseH, s.ss = setup.ss, s.outW = setup.outW, s.outH = setup.outH;
+        s.tapIndex = setup.tapIndex, s.tapFx = setup.tapFx, s.tapFy = setup.tapFy;
+        s.threshold = setup.threshold, s.hotRate = setup.hotRate;
+        v->chain = std::make_unique<vulkan::SensorChain>(*core()->ctx, s);
+        return true;
+    }
+
+    bool VulkanRenderer::queueSensorRgb(uint32_t handle, const SensorRgbOp& op, uint32_t srcView) {
+        auto* v = core()->findView(handle);
+        if (!v || !v->chain || v->chain->kind() != vulkan::SensorChain::Kind::Rgb) return false;
+        vulkan::SensorChain::RgbOp o;
+        o.accumulate = op.accumulate, o.clear = op.clear, o.invGain = op.invGain, o.finish = op.finish, o.nInv = op.nInv;
+        o.k = op.k, o.g = op.g, o.fullWell = op.fullWell, o.readNoise = op.readNoise, o.seed = op.seed;
+        o.exportLinear = op.exportLinear;
+        return v->chain->queue(o, srcView);
+    }
+
+    bool VulkanRenderer::queueSensorEvents(uint32_t handle, const SensorEventOp& op, uint32_t srcView) {
+        auto* v = core()->findView(handle);
+        if (!v || !v->chain || v->chain->kind() != vulkan::SensorChain::Kind::Events) return false;
+        vulkan::SensorChain::EventOp o;
+        o.first = op.first, o.dt = op.dt, o.seed = op.seed, o.minLuma = op.minLuma, o.maxEvents = op.maxEvents;
+        o.refractory = op.refractory, o.background = op.background, o.baHz = op.baHz, o.baDark = op.baDark;
+        o.bandwidth = op.bandwidth, o.tauDay = op.tauDay, o.tauMax = op.tauMax, o.illumRef = op.illumRef;
+        o.illumGain = op.illumGain, o.jitter = op.jitter, o.vizDecay = op.vizDecay, o.writeViz = op.writePane;
+        return v->chain->queue(o, srcView);
+    }
+
+    bool VulkanRenderer::readSensorRgb(uint32_t handle, std::vector<unsigned char>& rgb8, double& linearSum,
+                                       std::vector<float>* linearSumImage) {
+        auto* v = core()->findView(handle);
+        return v && v->chain && v->chain->readRgb(rgb8, linearSum, linearSumImage);
+    }
+
+    bool VulkanRenderer::readSensorEvents(uint32_t handle, std::vector<SensorEvent>& out, bool& overflow) {
+        auto* v = core()->findView(handle);
+        if (!v || !v->chain || v->chain->kind() != vulkan::SensorChain::Kind::Events) return false;
+        thread_local std::vector<vulkan::SensorChain::Event> raw;
+        v->chain->readEvents(raw, overflow);
+        out.resize(raw.size());
+        for (size_t i = 0; i < raw.size(); ++i)
+            out[i] = {static_cast<uint16_t>(raw[i].xy & 0xffffu), static_cast<uint16_t>(raw[i].xy >> 16u), raw[i].t,
+                      static_cast<int8_t>(raw[i].polarity), (raw[i].signal & 1u) != 0u, static_cast<uint16_t>(raw[i].signal >> 1u)};
+        return true;
+    }
+
+    bool VulkanRenderer::readSensorEventPane(uint32_t handle, std::vector<unsigned char>& rgba8) {
+        auto* v = core()->findView(handle);
+        return v && v->chain && v->chain->readViz(rgba8);
+    }
+
+    bool VulkanRenderer::readSensorTauHistogram(uint32_t handle, std::array<uint32_t, 40>& hist) {
+        auto* v = core()->findView(handle);
+        if (!v || !v->chain) return false;
+        v->chain->readTauHistogram(hist);
+        return true;
+    }
+
+    bool VulkanRenderer::setViewSensorShading(uint32_t handle, bool denoise) {
+        auto* v = core()->findView(handle);
+        if (!v || !v->secondary) return false;
+        v->sensorDenoise = denoise;
         return true;
     }
 

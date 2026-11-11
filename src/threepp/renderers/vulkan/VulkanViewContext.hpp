@@ -18,6 +18,7 @@
 #include "DeferredShade.hpp"
 #include "PostComposite.hpp"
 #include "TaaResolve.hpp"
+#include "SensorChain.hpp"
 
 #include "threepp/cameras/Camera.hpp"
 
@@ -200,6 +201,22 @@ namespace threepp::vulkan::impl {
         // is active, because DLSS and FSR reconstruct from the jitter
         // (Impl::viewTaaOff).
         bool    taaEnabled = true;
+        // Rendered at all this frame (VulkanRenderer::setViewEnabled)? A
+        // disabled view keeps every resource and its last picture, and costs
+        // nothing per frame: a rig that renders its cameras at different
+        // instants (a blur's sub-poses, an event camera's sub-renders) turns
+        // each on for its own sensor frame.
+        bool    enabled = true;
+        // A measurement camera with no temporal state (setViewSensorMode):
+        // TAA off (see taaEnabled), every temporal path of the shade started
+        // fresh each frame, ReSTIR DI's reuse off, and the shade's stochastic
+        // seed held, so a static scene renders the same picture every frame
+        // and an image differs from the last only where the scene moved.
+        bool    sensorMode = false;
+        bool    sensorDenoise = true;   // a sensor-mode view's SVGF denoise (setViewSensorShading)
+        // The camera's image chain on this view (setViewSensorChain): lens,
+        // blur and sensor, or an event camera's pixels, run after its passes.
+        std::unique_ptr<vulkan::SensorChain> chain;
         // May this view rasterize SplatClouds (VulkanRenderer::setViewSplats)?
         // Off by default because the splat sort scales with splat count rather
         // than view size, so a second view is a second full sort — an RGB

@@ -1742,6 +1742,16 @@ void VulkanRenderer::Impl::ensureSceneBuilt(Object3D& scene, Camera& camera) {
                             auto* dm = static_cast<DisplacedMesh*>(entries[i].mesh);
                             auto stIt = displacedStates.find(dm);
                             if (stIt == displacedStates.end()) continue;
+                            // A sensor frame at the instant the water was last updated for
+                            // (an event camera's sub-renders between two ticks hold the
+                            // scene): the surface, its BLAS and its foam are already that
+                            // instant's, so the FFT chain is not run again.
+                            // (a display frame at that instant too: the same surface)
+                            {
+                                auto [it, fresh] = displacedLastT_.try_emplace(dm, now);
+                                if (!fresh && it->second == now) continue;
+                                it->second = now;
+                            }
                             pendingDisplacedDeforms_.emplace_back(dm, stIt->second.get(), now);
                             ++dm->frameTick;
                         }

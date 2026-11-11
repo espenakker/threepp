@@ -4700,7 +4700,7 @@ namespace threepp {
         // The async-compute pilot builds it in two calls: AsyncOnly (probeGI,
         // clusterBuild, cloudShadow, froxels, into computeGraph_) and
         // SkipAsync (everything else, into the frame graph).
-        enum class DispatchPart { All, AsyncOnly, SkipAsync };
+        enum class DispatchPart { All, AsyncOnly, SkipAsync, ProbeOnly };
         void addSceneDispatchPasses(vulkan::rg::RenderGraph& g, DispatchPart part = DispatchPart::All);
 
         // Called once after bloom_->createImages(); wires sceneHdr views.
@@ -5033,6 +5033,22 @@ namespace threepp {
         // allocates; rendering an existing one costs a second pass over the
         // shared scene and nothing else.
         uint32_t addViewImpl(Camera& camera, uint32_t width, uint32_t height);
+        // Sensor frames (VulkanRenderer::renderSensorViews): the frame records the
+        // world-space head (instances, deformers, TLAS, probe GI) and the ENABLED
+        // secondary views only. No swapchain image is acquired, written or
+        // presented, so a sensor frame between two display frames leaves the
+        // window alone. sensorFrame_ is set around the render() call;
+        // frameIsSensor_ latches it for endFrame.
+        bool sensorFrame_   = false;
+        bool sensorSceneHold_ = true;          // sensor frames at the last build's instant skip the build
+        double sceneBuiltT_ = -1e300;          // the frame time the scene was last built at
+        const Object3D* sceneBuiltRoot_ = nullptr;
+        double probeLastT_  = -1.0;   // the frame time of the last probe-GI update (a sensor frame skips a repeat)
+        std::unordered_map<const void*, float> displacedLastT_;   // a DisplacedMesh's last update time (sensor frames skip a repeat)
+        bool frameIsSensor_ = false;
+        void renderSensorViewsImpl(Object3D& scene, Camera& camera);
+        bool setViewEnabledImpl(uint32_t handle, bool enabled);
+        bool setViewSensorModeImpl(uint32_t handle, bool enabled);
         bool     removeViewImpl(uint32_t handle);
         bool     setViewCameraImpl(uint32_t handle, Camera& camera);
         ViewContext* findView(uint32_t handle);
