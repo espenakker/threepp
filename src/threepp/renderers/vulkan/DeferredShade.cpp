@@ -1278,6 +1278,9 @@ namespace threepp::vulkan {
         // KRV_REFL_WATER_HIT (on by default; =0 rolls back): the water's own reflection ray that meets the sea ends there
         // and returns that water's radiance, instead of passing through it (oceanOptions2 bit 21)
         if (const char* v = std::getenv("KRV_REFL_WATER_HIT"); !(v && *v == '0')) push.oceanOptions2 |= 2097152u;
+        // KRV_NORMAL_NO_FLIP (on by default; =0 rolls back): over the water a shading normal that leans away from the eye
+        // is not negated into one pointing down into the water (oceanOptions2 bit 22)
+        if (const char* v = std::getenv("KRV_NORMAL_NO_FLIP"); !(v && *v == '0')) push.oceanOptions2 |= 4194304u;
         // KRV_REFL_LOBE_SLOPE (on by default; =0 rolls back): the mirror lobe is as wide as the slope the Fresnel and
         // sky integral uses, banked + the material's remainder (oceanOptions2 bit 20)
         if (const char* v = std::getenv("KRV_REFL_LOBE_SLOPE"); !(v && *v == '0')) push.oceanOptions2 |= 1048576u;

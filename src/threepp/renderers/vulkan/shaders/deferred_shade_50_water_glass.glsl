@@ -490,7 +490,16 @@ float waterFresnelExact(float c, float n) {
 // pixel showed the bare water body, a black core.
 vec3 waterVisibleNormal(vec3 N, vec3 Nmacro, vec3 V) {
     if ((pc.oceanOptions2 & 65536u) == 0u) return N;
-    vec3 n = normalize(mix(Nmacro, N, smoothstep(0.0, 0.12, dot(N, V))));
+    vec3 n;
+    if ((pc.oceanOptions2 & 4194304u) != 0u) {
+        // (KRV_NORMAL_NO_FLIP: a normal that faces away is a facet behind its own crest; what shows in its place is
+        // the crest, edge-on: the normal turned until it is seen edge-on. The easing to the macro normal stops
+        // half way, so the far side of a wave keeps its relief instead of going flat.)
+        const float nv = dot(N, V);
+        const vec3 Nt = nv < 0.0 ? normalize(N - V * nv) : N;
+        n = normalize(mix(Nmacro, Nt, max(smoothstep(0.0, 0.12, nv), 0.5)));
+    } else
+        n = normalize(mix(Nmacro, N, smoothstep(0.0, 0.12, dot(N, V))));
     const float c = dot(n, V);
     if (c < 0.02) n = normalize(n + V * (0.02 - c));
     return n;
@@ -870,6 +879,8 @@ vec3 shadeWater(vec3 P, vec3 N, vec3 V, MaterialDesc pm, int instIdx,
         // ignored the pixel footprint and the measured banked variance.
         const vec3 slopeUp=Nmacro;
         vec3 sunL; float sunF;
+        // (KRV_NORMAL_NO_FLIP: everything below takes a normal that faces away as seen edge-on)
+        if ((pc.oceanOptions2 & 4194304u) != 0u && !below && dot(N, V) < 0.0) N = normalize(N - V * (dot(N, V) - 1e-3));
         Nvis = waterVisibleNormal(N, Nmacro, V);
 #ifdef KRV_REFL_LOBE_EXPERIMENT
         // Paired audit: use the selected conditional measure for both F/sky

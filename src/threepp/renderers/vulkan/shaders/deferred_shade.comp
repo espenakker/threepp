@@ -1352,7 +1352,13 @@ void main() {
         const vec2 slopeMap = transpose(coarseMap) * (-N.xz / slopeNy) + naturalKept * wakeCalm;
         vec3 areaN = cross(vec3(fullMap[1].x, slopeMap.y, fullMap[1].y), vec3(fullMap[0].x, slopeMap.x, fullMap[0].y));
         vec3 waveN = dot(areaN, areaN) > 1e-12 ? normalize(areaN) : N;
-        if (dot(waveN, V) < 0.0) waveN = -waveN;
+        // KRV_NORMAL_NO_FLIP (oceanOptions2 bit 22, on by default; =0 rolls back): over the water a normal that
+        // leans away from the eye is not negated. Negating it gave a normal pointing DOWN into the water (opposite
+        // to the surface's own) on the far side of every short wave a low camera looks along: a patch that the
+        // reflection optics could only fill flat from the macro normal, with a thin black line where the two
+        // normals cancelled. It now stays what it is, and the optics take the facet as seen edge-on
+        // (waterVisibleNormal).
+        if (dot(waveN, V) < 0.0 && (camUnderwater() || (pc.oceanOptions2 & 4194304u) == 0u)) waveN = -waveN;
         vec3 detailN = vec3(-(gKept - naturalKept * wakeCalm).x, 0.0, -(gKept - naturalKept * wakeCalm).y);
         if (camUnderwater() && dot(waveN, areaN) < 0.0) detailN = -detailN;
         N = normalize(waveN + detailN);
