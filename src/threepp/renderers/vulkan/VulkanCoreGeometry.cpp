@@ -2746,6 +2746,51 @@ void VulkanRenderer::Impl::recordDisplacedUpdate(VkCommandBuffer cb, DisplacedMe
                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                         0, 1, &mb, 0, nullptr, 0, nullptr);
             }
+            // DisplacedMesh::rippleMoments: this frame's top level from the host, then the mips, each a box of the
+            // one above (so the third channel stays the mean of the squares). GENERAL throughout.
+            if (st.capImage != VK_NULL_HANDLE && dm.rippleMoments.dim == st.capDim &&
+                dm.rippleMoments.texels.size() == size_t(st.capDim) * st.capDim * 4u) {
+                const VkDeviceSize bytes = VkDeviceSize(st.capDim) * st.capDim * 16u;
+                auto& sb = st.capStaging[currentFrame];
+                if (sb.handle == VK_NULL_HANDLE) {
+                    sb = createBuffer(ctx->allocator(), ctx->device(), bytes,
+                                      VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_AUTO,
+                                      VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+                                              VMA_ALLOCATION_CREATE_MAPPED_BIT);
+                    ctx->setObjectName(sb.handle, "ocean.rippleMoments.staging");
+                }
+                void* mapped = nullptr;
+                check(vmaMapMemory(ctx->allocator(), sb.alloc, &mapped), "vmaMapMemory(ripple moments)");
+                std::memcpy(mapped, dm.rippleMoments.texels.data(), bytes);
+                vmaUnmapMemory(ctx->allocator(), sb.alloc);
+                vmaFlushAllocation(ctx->allocator(), sb.alloc, 0, bytes);
+                VkMemoryBarrier cmb{};
+                cmb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+                cmb.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+                cmb.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT;
+                vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &cmb, 0, nullptr, 0, nullptr);
+                VkBufferImageCopy bic{};
+                bic.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+                bic.imageExtent = {st.capDim, st.capDim, 1};
+                vkCmdCopyBufferToImage(cb, sb.handle, st.capImage, VK_IMAGE_LAYOUT_GENERAL, 1, &bic);
+                cmb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                cmb.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+                for (uint32_t m = 1; m < st.capMips; ++m) {
+                    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &cmb, 0, nullptr, 0, nullptr);
+                    VkImageBlit blit{};
+                    blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, m - 1u, 0, 1};
+                    blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, m, 0, 1};
+                    const int32_t s = static_cast<int32_t>(std::max(st.capDim >> (m - 1u), 1u));
+                    const int32_t t = static_cast<int32_t>(std::max(st.capDim >> m, 1u));
+                    blit.srcOffsets[1] = {s, s, 1};
+                    blit.dstOffsets[1] = {t, t, 1};
+                    vkCmdBlitImage(cb, st.capImage, VK_IMAGE_LAYOUT_GENERAL, st.capImage, VK_IMAGE_LAYOUT_GENERAL, 1, &blit, VK_FILTER_LINEAR);
+                }
+                cmb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+                vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                     VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                                     0, 1, &cmb, 0, nullptr, 0, nullptr);
+            }
             for (uint32_t i = 0; i < 3; ++i) {
                 if (!(st.cascadeMask & (1u << i))) continue;
                 auto& c = st.cascades[i];
@@ -3349,14 +3394,8 @@ void VulkanRenderer::Impl::recordDisplacedUpdate(VkCommandBuffer cb, DisplacedMe
                     fpc.cascadeMask |= (1u << 25u) | (nB << 26u);
                 }
                 // KRV_WATER_BUBBLES=1 keeps the bubble plumes' history in the field's alpha (bit 3), injected by the
-                // in-place breakers and the wash; =2 also by the band's deposits (bit 4). KRV_WATER_BUBBLES_TAU picks the
-                // plume's e-folding for calibration (bits 5..6: 10 s, or 6 / 15 / 20)
-                if (const char *wb = std::getenv("KRV_WATER_BUBBLES"); wb && (*wb == '1' || *wb == '2')) {
-                    static const unsigned tauSel = [] {
-                        const char *v = std::getenv("KRV_WATER_BUBBLES_TAU"); const int s = v ? std::atoi(v) : 10;
-                        return s == 6 ? 1u : s == 15 ? 2u : s == 20 ? 3u : 0u; }();
-                    fpc.cascadeMask |= 8u | (*wb == '2' ? 16u : 0u) | (tauSel << 5u);
-                }
+                // in-place breakers and the wash (the band's breaking fronts show their air live, in the shade)
+                if (const char *wb = std::getenv("KRV_WATER_BUBBLES"); wb && wb[0] == '1' && wb[1] == '\0') fpc.cascadeMask |= 8u;
                 if (timed) gpuTimings_->begin(cb, vulkan::TP_OceanFoam, currentFrame);
                 {   // the previous frame's foam into its copy, which the advection reads
                     VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
@@ -4841,6 +4880,53 @@ VulkanRenderer::Impl::DisplacedMeshState* VulkanRenderer::Impl::ensureDisplacedS
                 state->blas->oceanWakeTable = state->wake->tableAddress();
                 oceanWakeView = state->wake->stateView();
                 if (state->wake->rippleView() != VK_NULL_HANDLE) oceanRippleView = state->wake->rippleView();
+            }
+            // The ripple layer's slope moments, if the host supplies any (DisplacedMesh::rippleMoments): the image is
+            // made here, zero, so its view is in the descriptors before the first frame; the texels come each frame.
+            if (dm.rippleMoments.dim > 0u) {
+                const uint32_t dim = dm.rippleMoments.dim;
+                uint32_t mips = 1u;
+                while ((dim >> mips) > 0u) ++mips;
+                VkImageCreateInfo ici{};
+                ici.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+                ici.imageType     = VK_IMAGE_TYPE_2D;
+                ici.format        = VK_FORMAT_R32G32B32A32_SFLOAT;
+                ici.extent        = {dim, dim, 1};
+                ici.mipLevels     = mips;
+                ici.arrayLayers   = 1;
+                ici.samples       = VK_SAMPLE_COUNT_1_BIT;
+                ici.tiling        = VK_IMAGE_TILING_OPTIMAL;
+                ici.usage         = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+                ici.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
+                ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+                VmaAllocationCreateInfo aci{};
+                aci.usage = VMA_MEMORY_USAGE_AUTO;
+                check(vmaCreateImage(ctx->allocator(), &ici, &aci, &state->capImage, &state->capAlloc, nullptr), "vmaCreateImage(ocean ripple moments)");
+                ctx->setObjectName(state->capImage, "ocean.rippleMoments");
+                VkImageViewCreateInfo vci{};
+                vci.sType    = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+                vci.image    = state->capImage;
+                vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+                vci.format   = ici.format;
+                vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, mips, 0, 1};
+                check(vkCreateImageView(ctx->device(), &vci, nullptr, &state->capView), "vkCreateImageView(ocean ripple moments)");
+                state->capDim = dim;
+                state->capMips = mips;
+                VkCommandBuffer cb = beginOneShot();
+                VkImageMemoryBarrier imb{};
+                imb.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                imb.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                imb.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+                imb.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+                imb.image = state->capImage;
+                imb.subresourceRange = vci.subresourceRange;
+                imb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                imb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &imb);
+                const VkClearColorValue zero{};
+                vkCmdClearColorImage(cb, state->capImage, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &vci.subresourceRange);
+                endAndSubmitOneShot(cb);
+                oceanCapillaryView = state->capView;
             }
             rewriteDeferredDescriptors();
 

@@ -506,6 +506,13 @@ namespace threepp::vulkan::impl {
         // displacement, dim²·16 bytes), one per frame in flight; allocated on
         // first use.
         Buffer    externalStaging[3][kFramesInFlight] = {};
+        // DisplacedMesh::rippleMoments: its mipped image (RGBA32F, GENERAL throughout) and the host-visible staging
+        // of its top level, one per frame in flight.
+        VkImage       capImage = VK_NULL_HANDLE;
+        VmaAllocation capAlloc = VK_NULL_HANDLE;
+        VkImageView   capView  = VK_NULL_HANDLE;
+        uint32_t      capDim = 0, capMips = 0;
+        Buffer        capStaging[kFramesInFlight] = {};
         // Per-cascade readback texture dimension. Cascades can run at
         // different FFT resolutions — each cascade's readback buffer is
         // sized to its own dim²·16 bytes: the height image (RG32F) at

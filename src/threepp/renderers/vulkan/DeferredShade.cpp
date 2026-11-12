@@ -52,7 +52,7 @@ namespace threepp::vulkan {
     // that no validation layer can see). Both tables are std::array of this
     // size now, filled through .at(), and the fill count is checked, so the
     // failure mode is a loud throw at init instead.
-    constexpr uint32_t kDeferredBindingCount = 88;
+    constexpr uint32_t kDeferredBindingCount = 89;
 
     // ParticleField density volumes bound at once (binding 67 is an array of
     // this many). KEEP IN SYNC with kMaxDensityFields in
@@ -276,6 +276,9 @@ namespace threepp::vulkan {
         set(81, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER); // ocean horizontal displacement, fine cascade
 
         set(88, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER); // camera-only analytic sun background
+        // The ripple layer's slope moments (DisplacedMesh::rippleMoments): mipped, trilinear, anisotropic, REPEAT.
+        // The fine-height dummy when no ocean supplies any.
+        set(89, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER); // ocean ripple slope moments (rgba32f, mipped)
 
         // Exact fit is the contract: a new binding must bump
         // kDeferredBindingCount, and rewriteDescriptors must gain the matching
@@ -1099,6 +1102,9 @@ namespace threepp::vulkan {
             }
             VkDescriptorImageInfo sunBgInfo = sampled(in.sunBackgroundView, in.sunBackgroundSampler);
             setw(87, 88, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &sunBgInfo, nullptr);
+            VkDescriptorImageInfo oceanCapInfo = oceanRippleInfo;
+            oceanCapInfo.imageView = in.oceanCapillaryView;
+            setw(88, 89, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &oceanCapInfo, nullptr);
             // Without ray query the layout has no binding 8: drop its write.
             uint32_t writeCount = static_cast<uint32_t>(w.size());
             if (!ctx_.rayQuerySupported()) {
@@ -1269,7 +1275,7 @@ namespace threepp::vulkan {
         if (const char* v = std::getenv("KRV_REFL_HORIZON_VIS"); v && std::strcmp(v, "1") == 0) push.oceanOptions2 |= 2u;
         // the mirror lobe is the default; KRV_REFL_MIRROR_LOBE=0 restores the previous behaviour.
         if (const char* v = std::getenv("KRV_REFL_MIRROR_LOBE"); !v || std::strcmp(v, "0") != 0) push.oceanOptions2 |= 32u;
-        // b12cam: lamps on water (oceanOptions2 bit 11): the column in-scatter through the forward HG lobe, no Lambert pool
+        // lamps on water (oceanOptions2 bit 11): the column in-scatter through the forward HG lobe, no Lambert pool
         if (const char* v = std::getenv("KRV_WATER_LAMPS"); v && std::strcmp(v, "1") == 0) push.oceanOptions2 |= 2048u;
         // breakers in place (oceanOptions2 bit 13): the storm look's grouped sheet off, the field's breakers drawn
         // speck fix: the mirror lobe's downward rays return the water body too, and the lobe eases to the macro normal on
@@ -1278,6 +1284,9 @@ namespace threepp::vulkan {
         // KRV_REFL_WATER_HIT (on by default; =0 rolls back): the water's own reflection ray that meets the sea ends there
         // and returns that water's radiance, instead of passing through it (oceanOptions2 bit 21)
         if (const char* v = std::getenv("KRV_REFL_WATER_HIT"); !(v && *v == '0')) push.oceanOptions2 |= 2097152u;
+        // KRV_CAPILLARY=1 (opt-in): the ripple layer, the 1-30 cm waves on the normal from the host's slope moments
+        // (binding 89), what a pixel does not resolve of them banked (oceanOptions2 bit 17)
+        if (const char* v = std::getenv("KRV_CAPILLARY"); v && *v == '1') push.oceanOptions2 |= 131072u;
         // KRV_NORMAL_NO_FLIP (on by default; =0 rolls back): over the water a shading normal that leans away from the eye
         // is not negated into one pointing down into the water (oceanOptions2 bit 22)
         if (const char* v = std::getenv("KRV_NORMAL_NO_FLIP"); !(v && *v == '0')) push.oceanOptions2 |= 4194304u;
@@ -1296,12 +1305,8 @@ namespace threepp::vulkan {
         // KRV_CAP_TRAIL=1, a cap as a thin white crest line with a grey broken trail behind it instead of a
         // white patch (oceanOptions2 bit 19; storm look)
         if (const char* v = std::getenv("KRV_CAP_TRAIL"); v && std::strcmp(v, "1") == 0) push.oceanOptions2 |= 524288u;
-        // KRV_WATER_BUBBLES=1 (or 2), bubble plume backscatter in the water body (oceanOptions2 bit 15).
-        // KRV_WATER_BUBBLES_BB=n scales the plumes' backscatter by n/16 for calibration (oceanOptions2 bits 24..29)
-        if (const char* v = std::getenv("KRV_WATER_BUBBLES"); v && (std::strcmp(v, "1") == 0 || std::strcmp(v, "2") == 0)) {
-            static const uint32_t bbN = [] { const char* b = std::getenv("KRV_WATER_BUBBLES_BB"); return b ? std::min(63u, unsigned(std::atoi(b))) : 16u; }();
-            push.oceanOptions2 |= KRV_OPT2_WATER_BUBBLES | (bbN << 24u);
-        }
+        // KRV_WATER_BUBBLES=1, bubble plume backscatter in the water body (oceanOptions2 bit 15).
+        if (const char* v = std::getenv("KRV_WATER_BUBBLES"); v && std::strcmp(v, "1") == 0) push.oceanOptions2 |= KRV_OPT2_WATER_BUBBLES;
         if (const char* v = std::getenv("KRV_REFL_REFINE_NEAR"); v && *v == '1') push.oceanOptions |= 2u;
         if (const char* v = std::getenv("KRV_REFL_SKIP_SEA"); v && *v == '1') push.oceanOptions |= 4u;
         // Render-only ablations for the artifact evidence.

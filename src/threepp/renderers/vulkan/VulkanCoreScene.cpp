@@ -2670,6 +2670,13 @@ void VulkanRenderer::Impl::ensureSceneBuilt(Object3D& scene, Camera& camera) {
                         for (auto& ring : st->heightReadback)
                             for (auto& b : ring) destroyBuffer(ctx->allocator(), b);
                         for (auto& ring : st->externalStaging) for (auto& b : ring) destroyBuffer(ctx->allocator(), b);
+                        for (auto& b : st->capStaging) destroyBuffer(ctx->allocator(), b);
+                        if (st->capView) {
+                            if (st->capView == oceanCapillaryView) oceanCapillaryView = oceanFineHeightDummy.view;
+                            vkDestroyImageView(ctx->device(), st->capView, nullptr);
+                            vmaDestroyImage(ctx->allocator(), st->capImage, st->capAlloc);
+                            st->capView = VK_NULL_HANDLE; st->capImage = VK_NULL_HANDLE;
+                        }
                         destroyBuffer(ctx->allocator(), st->foamDisturbBuffer);
                         destroyBuffer(ctx->allocator(), st->foamAuditBuffer);
                         for (auto& b : st->vesselBuffer) destroyBuffer(ctx->allocator(), b);

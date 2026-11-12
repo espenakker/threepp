@@ -742,6 +742,8 @@ namespace threepp {
         VkImageView oceanWakeView = VK_NULL_HANDLE;
         // Its ripples' slopes (binding 79), or the same dummy.
         VkImageView oceanRippleView = VK_NULL_HANDLE;
+        // The host's ripple slope moments (binding 89, DisplacedMesh::rippleMoments), or the fine-height dummy.
+        VkImageView oceanCapillaryView = VK_NULL_HANDLE;
 
         // Tileable foam detail texture (deferred shade foam binding).
         // R = micro bubble brightness (three value-noise octaves matching the

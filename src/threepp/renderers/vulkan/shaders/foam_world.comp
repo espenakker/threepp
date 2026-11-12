@@ -804,8 +804,12 @@ void main() {
     // (KRV_WATER_BUBBLES, cascadeMask bit 3): the bubble plumes under the breakers (only at the crests,
     // with the breakers' own placement and trigger). A plume is injected where an in-place breaker is breaking, by the
     // same value that lays its foam (so the same steepness trigger, cell and lobes) and only under its dense part, a
-    // weak or thin breaker injects none; and under a vessel's wash; with bit 4 (KRV_WATER_BUBBLES=2) also where the
-    // band's gated deposit is laid. It then thins on its own clock, slower than the foam on top (Monahan & Lu 1990's
+    // weak or thin breaker injects none; and under a vessel's wash. (the band's large breakers inject most
+    // of a storm's air, but not into this history. The band rides its crest, 15 m/s and more, so whatever it lays here is
+    // a trail over all the water it crossed: laid wherever it was breaking the plumes covered half the sea, by rate a
+    // third, held to its breaking events a tenth, still as clouds tens of metres across lying on open water long after
+    // their foam. Its air is shown by the shade, live, at the front of the breaking region itself.) It then thins on its
+    // own clock, slower than the foam on top (Monahan & Lu 1990's
     // beta and gamma plumes; Deane & Stokes 2002) but while the patch it came from can still be seen: one e-folding in
     // 10 s less a constant rate, so it ends: half left after 5 s, a quarter after 10 s, nothing after 18 s (at the first
     // 15 s and 0.004 / s a plume lasted 43 s, long after its foam, and the sea read as teal dots). It rides the foam's
@@ -813,12 +817,11 @@ void main() {
     // (alpha; 0 with the switch off, and 0 wherever nothing broke, where the shade adds nothing).
     float plume = 0.0;
     if ((pc.cascadeMask & 8u) != 0u) {
-        float laid = max(smoothstep(0.25, 0.7, brk), smoothstep(0.1, 0.5, max(wakeFoam, disturbFoam)));
-        if ((pc.cascadeMask & 16u) != 0u) laid = max(laid, (renew ? depositing : 0.0) * smoothstep(0.05, 0.3, result));
-        // (calibration, cascadeMask bits 5..6, KRV_WATER_BUBBLES_TAU: 10 s, or 6 / 15 / 20)
-        const uint tauSel = (pc.cascadeMask >> 5u) & 3u;
-        const float tauP = tauSel == 0u ? 10.0 : tauSel == 1u ? 6.0 : tauSel == 2u ? 15.0 : 20.0;
-        plume = clamp(max(prevPlume * (pc.simDt > 0.0 ? exp(-pc.simDt / tauP) : 1.0) - 0.02 * max(pc.simDt, 0.0), laid), 0.0, 1.0);
+        // (from where the breaker's foam is drawn as breaking, the shade's 0.58-0.8 of the 0.9 brk it lays:
+        // from 0.25 a weak breaker, or a strong one's wide rim, laid a full plume under foam too thin to see, and at one
+        // strength at any range that was a teal sheet tens of metres long on a bare wave)
+        const float laid = max(smoothstep(0.6, 0.88, brk), smoothstep(0.1, 0.5, max(wakeFoam, disturbFoam)));
+        plume = clamp(max(prevPlume * (pc.simDt > 0.0 ? exp(-pc.simDt / 10.0) : 1.0) - 0.02 * max(pc.simDt, 0.0), laid), 0.0, 1.0);
     }
     imageStore(foam, ivec2(px), vec4(result, fresh, streak, plume));
 #ifdef KRV_FOAM_DIAGNOSTICS

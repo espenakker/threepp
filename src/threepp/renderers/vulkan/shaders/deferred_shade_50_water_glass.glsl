@@ -168,9 +168,9 @@ float foamStreaks(vec2 xz, float footprint) {
 // pixel's footprint (Dupuy & Bruneton 2012's linear pre-filtering): the edge softens by the footprint's spread of |n|, and
 // once a pixel spans several filaments it takes their mean cover (2w) rather than aliasing, so it mipmaps to the same cover.
 // KRV_WATER_BUBBLES: the bubbles' backscatter (1/m) in a plume a breaker has just injected, at Beaufort 10; the water's
-// own is about 0.008, so a fresh plume returns some six times the clear column (at the first 0.16 a plume was a flat
-// bright dot until it was nearly gone; at a third of that its brightness follows its age)
-const float kWaterBubbleBb = 0.05;
+// own is about 0.008, so a fresh plume returns some twenty times the clear column. One strength at any range: the
+// shading averages a plume over the water a pixel covers, and has no distance term
+const float kWaterBubbleBb = 0.15;
 
 float foamFilamentsW(vec2 xz, float footprint, float stretch, float w) {
     const vec2 wd = gFoamWind, wc = vec2(-wd.y, wd.x);
@@ -1773,7 +1773,7 @@ vec3 shadeWater(vec3 P, vec3 N, vec3 V, MaterialDesc pm, int instIdx,
                 } else {
                     atten = 1.0 / max(distFalloff(dist, clusterLights[li].decay), 0.01);
                 }
-                // b12cam (oceanOptions2 bit 11, KRV_WATER_LAMPS=1): a lamp is a delta light like the sun, so
+                // oceanOptions2 bit 11 (KRV_WATER_LAMPS=1): a lamp is a delta light like the sun, so
                 // its in-scatter takes the same forward HG lobe. mu is the cosine between the light's refracted
                 // propagation and the scattered light's, which travels back up the view leg (-dRef): a floodlight
                 // shining down and away from a camera beside it is seen near backscatter, 0.1-0.2x isotropic.
@@ -1848,8 +1848,9 @@ vec3 shadeWater(vec3 P, vec3 N, vec3 V, MaterialDesc pm, int instIdx,
         // Callaghan et al. 2008; W of Brumer et al. 2017, 1 at U10 26 m/s, nothing below Beaufort 6).
         // (bubbles only at the crests): the load is the foam field's plume history and nothing else
         // (foam_world.comp's alpha: injected where an in-place breaker breaks, by its own trigger, cell and lobes, and
-        // under the vessel's wash; gone in 18 s, spreading as it drifts). No sea-wide cloud, no background and no surface
-        // foam term: where the history is 0 this adds nothing and the water is the switch-off water, bit for bit. The
+        // under a moving vessel's wake; gone in 18 s, spreading as it drifts). No sea-wide cloud, no background and no surface
+        // foam term: where the history and the wash's air are 0 this adds nothing and the water is the switch-off water, bit
+        // for bit. The
         // layer's albedo is the water's own closure with the bubbles' backscatter added, 0.33 bbB / (a + bb + bbB) per
         // channel (Gordon et al. 1988), so its colour is this water's: a thin plume returns what the water absorbs
         // least (a dark teal in the North Sea preset, red gone) and a dense fresh one is turquoise. Works the same over
@@ -1857,14 +1858,66 @@ vec3 shadeWater(vec3 P, vec3 N, vec3 V, MaterialDesc pm, int instIdx,
         if ((pc.oceanOptions2 & KRV_OPT2_WATER_BUBBLES) != 0u && pc.oceanFoamTileSize > 0.0) {
             const float windB = pm.specularIntensity < 0.0 ? pm.dispersion : pm.iridescenceThicknessNm;
             if (windB < 100.0 && windB > 12.3) {
-                const float plumeB = clamp(sampleFoamBicubic4(gFoamXZ / pc.oceanFoamTileSize).a, 0.0, 1.0);
+                // a plume has one strength wherever the camera is. What changes with distance is the water a
+                // pixel covers: along the view that is metres at a low look (the band's footprint, footB below), and a
+                // plume a few metres across is averaged over it, so a far one fades to a faint tint by itself, as its cap
+                // does. One sample under 1.5 m of footprint, then one per 1.5 m, up to 12 along the view.
+                // The vessel's wash is aerated too, and its air is the wake field's own channel (gWake.g,
+                // not in the foam field): it loads the layer as well.
+                const vec3  toW = P - gPrimaryOrigin;
+                const float dW = length(toW);
+                const float fpW = dW * 0.001 / max(abs(toW.y) / max(dW, 1e-3), 0.02);
+                const int   nW = clamp(int(ceil(fpW / 1.5)), 1, 12);
+                const vec2  stepW = normalize(toW.xz + vec2(1e-5)) * (fpW / float(nW));
+                float plumeF = 0.0;
+                for (int i = 0; i < nW; ++i) plumeF += sampleFoamBicubic4((gFoamXZ + (float(i) - 0.5 * float(nW - 1)) * stepW) / pc.oceanFoamTileSize).a;
+                const float washB = below ? 0.0 : smoothstep(0.02, 0.3, gWake.g);
+                // And the band's large breakers, the caps drawn while a crest breaks, aerate the water at their front,
+                // live: a large breaker injects the most air, and its cap had no plume at all. The band rides its crest
+                // at 15 m/s and more, so in the field's history its plume was a trail over all the water the crest had
+                // crossed, a third to a half of the sea, and held to its breaking events still clouds tens of metres
+                // across on open water, so the history keeps none of it (foam_world.comp). This is the breaking itself, by the cap look's own measures: the event's
+                // depth along the wind (the band's fold over its threshold 4, 9 and 16 m up and down the wind, from 8 m
+                // deep to full at 26 m, so none at a small cap) and how far behind its front this point is. The air is
+                // in the first 10 m or so behind the front, where the cap is drawn and just behind it; the breaking
+                // region runs on over the whole crest top, and all of it tinted was every crest in view. In the band's
+                // groups, on the high part of the crest, away from the hull as the band is; and a pixel that covers
+                // more water than those 10 m carries its share of them. On the crest's front face and its top, where
+                // the band draws its white (by the wave's own normal, not the fine waves' that break the white up, so
+                // the gaps in a cap are tinted with it): the breaking region also runs down the crest's back and along
+                // its flanks, where no white is drawn, and tinted there it was a teal sheet on a bare wave.
+                float liveB = 0.0;
+                if (!below && floor(pm.sheenColor.b * 256.0) > 74.5) {
+                    const float irL = max(pm.iridescenceIOR - 1.0, 0.0), thrKL = floor(irL / 100.0);
+                    const float hsL = max(0.5, irL - 100.0 * thrKL);
+                    const float upL = smoothstep(0.05 * hsL, 0.3 * hsL, P.y - (pm.sheenRoughness * 100.0 - 50.0));
+                    const vec2  wvL = pm.sheenColor.rg * 2.0 - 1.0;
+                    const vec2  wdL = length(wvL) > 0.1 ? normalize(wvL) : vec2(1.0, 0.0);
+                    const float grpL = upL > 0.0 ? smoothstep(0.38, 0.6, fbm4(gFoamXZ * 0.012 - wdL * (0.012 * 4.0 * sqrt(hsL)) * pc.timeSec + 0.03 * vec2(-wdL.y, wdL.x) * pc.timeSec)) : 0.0;
+                    const float thrL = thrKL > 0.0 ? thrKL / 100.0 : 0.62 - 0.03 * gSeaRelief;
+                    const float inL = grpL > 0.0 ? smoothstep(thrL, thrL + 0.22, foamLiveFold(gFoamXZ)) : 0.0;
+                    if (inL > 0.0) {
+                        const float fU1 = foamLiveFold(gFoamXZ - 4.0 * wdL), fU2 = foamLiveFold(gFoamXZ - 9.0 * wdL), fU3 = foamLiveFold(gFoamXZ - 16.0 * wdL);
+                        const float fD1 = foamLiveFold(gFoamXZ + 4.0 * wdL), fD2 = foamLiveFold(gFoamXZ + 9.0 * wdL), fD3 = foamLiveFold(gFoamXZ + 16.0 * wdL);
+                        const float enL = smoothstep(8.0, 26.0, 4.0 * (smoothstep(thrL, thrL + 0.1, fU1) + smoothstep(thrL, thrL + 0.1, fD1))
+                                                              + 5.0 * (smoothstep(thrL, thrL + 0.1, fU2) + smoothstep(thrL, thrL + 0.1, fD2))
+                                                              + 7.0 * (smoothstep(thrL, thrL + 0.1, fU3) + smoothstep(thrL, thrL + 0.1, fD3)));
+                        const float aheadL = (4.0 * smoothstep(thrL, thrL + 0.25, fD1) + 5.0 * smoothstep(thrL, thrL + 0.25, fD2) + 7.0 * smoothstep(thrL, thrL + 0.25, fD3)) / 16.0;
+                        // (and only as far out as the band draws its cap, by the band's own fade: past it the white is gone and
+                        // the air alone was a teal crest with no cap on it, all along the far sea from a low eye)
+                        liveB = upL * grpL * inL * enL * (1.0 - smoothstep(0.3, 0.75, aheadL)) * min(1.0, 10.0 / max(fpW, 1e-3))
+                              * smoothstep(-0.08, 0.04, dot(Nmacro.xz, wdL))
+                              * ((pc.oceanOptions2 & KRV_OPT2_BAND_FOOTPRINT_FADE) != 0u ? 1.0 - smoothstep(2.8, 6.4, fpW) : 1.0 - smoothstep(400.0, 600.0, dW))
+                              * ((pc.oceanOptions & 8388608u) != 0u ? oceanNaturalCapHullKeep(geoms[instIdx].foamAddress, P.xz) : 1.0);
+                    }
+                }
+                const float plumeB = max(max(clamp(plumeF / float(nW), 0.0, 1.0), washB), liveB);
                 if (plumeB > 0.0) {
                     const float wN = 7.38e-4 * pow(windB - 4.23, 1.42) / 0.0586 * smoothstep(12.3, 19.0, windB);
                     // (a thin layer: its optical depth is seen along the refracted view, 1/mu_w, up to 1.5x at grazing)
                     const float cosB = clamp(dot(Nmacro, V), 0.0, 1.0);
                     const float muB = sqrt(1.0 - (1.0 - cosB * cosB) / (ior * ior));
-                    // (calibration: KRV_WATER_BUBBLES_BB scales the backscatter by n/16, oceanOptions2 bits 24..29)
-                    const float bbB = kWaterBubbleBb * (float((pc.oceanOptions2 >> 24u) & 63u) / 16.0) * wN * plumeB / muB;
+                    const float bbB = kWaterBubbleBb * wN * plumeB / muB;
                     const vec3 Ab = 0.33 * bbB / (sigmaT + bbB);
                     transmitColor = transmitColor * (1.0 - Ab) + Ab * (skyEd + 0.94 * EdSun) / (PI * ior * ior);
                 }
@@ -2075,7 +2128,7 @@ vec3 shadeWater(vec3 P, vec3 N, vec3 V, MaterialDesc pm, int instIdx,
             // (micro-facets beyond the GGX tail, spray, top-layer scatter);
             // at roughness 0.04 the pure specular lobe is so tight the lit
             // pool would otherwise be invisible unless perfectly aligned.
-            // b12cam (bit 11): not with the column's lamp in-scatter, which is that top-layer return computed
+            // bit 11: not with the column's lamp in-scatter, which is that top-layer return computed
             // (sigma_s, the HG lobe, the leg): the flat 3.5 % Lambert pool on top of it read as a milky sheet.
             if ((pc.oceanOptions2 & 2048u) == 0u) spec += 0.035 / PI;
             vec3 c = spec * ndl * clusterLights[li].color * atten * vis;

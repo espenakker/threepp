@@ -516,6 +516,19 @@ namespace threepp {
         };
         ExternalField externalCascades[3];
 
+        // A host-supplied slope-moment field for the water shade's ripple layer (the waves under the fine cascade's
+        // cells, drawn on the normal only): dim*dim texels of (slope x, slope z, slope x^2 + slope z^2, 0), row-major,
+        // texel (ix, iz) over world XZ (ix, iz) * tileSize / dim, one period of the field. With dim > 0 when the
+        // renderer first sees the mesh it keeps a mipped image of that size (binding 89) and uploads `texels` each
+        // frame they hold dim*dim*4 floats; each mip is a box of the one above, so the third channel stays the mean
+        // of the squares and the mean less the square of the mean slope is what the filter took away. dim = 0: none.
+        struct MomentField {
+            std::vector<float> texels;
+            uint32_t dim = 0;
+            float tileSize = 0.f;
+        };
+        MomentField rippleMoments;
+
         // Combined wave height of the rendered surface over (worldX, worldZ).
         // Mirrors water_displace.comp's sampleDisplacement(): cascades 0 and 1
         // are B-spline filtered, cascade 2 bilinear, and each contributes
